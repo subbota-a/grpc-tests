@@ -1,0 +1,18 @@
+syntax = "proto3";
+
+package mypkg;
+
+service MyService {
+  rpc ServerStream (CountMsg) returns (stream StringMsg) {}
+  rpc Single (StringMsg) returns (StringMsg) {}
+  rpc ClientStream(stream StringMsg) returns (CountMsg) {}
+  rpc BiStream(stream StringMsg) returns (stream StringMsg) {}
+}
+
+message CountMsg {
+  int32 num = 1;
+}
+
+message StringMsg {
+  string text = 1;
+}

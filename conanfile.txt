@@ -1,0 +1,11 @@
+[requires]
+grpc/1.46.3
+gtest/1.12.1
+magic_enum/0.8.0
+
+[generators]
+cmake_find_package
+cmake_paths
+
+[imports]
+bin, *.dll -> .
