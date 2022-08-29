@@ -21,7 +21,7 @@ std::ostream &operator<<(std::ostream &os, const Scenario &value) {
 
 std::ostream &operator<<(std::ostream &os, const google::protobuf::Message &value) { return os << value.DebugString(); }
 
-class ClientStreamFixture : public ::testing::TestWithParam<Scenario> {
+class ClientStreamFixture : public ::testing::Test {
 protected:
     enum Operation : std::intptr_t {// has to be the same size as pointer
         IncomingCall,
@@ -183,12 +183,16 @@ protected:
     std::unique_ptr<grpc::ServerAsyncReader<CountMsg, StringMsg>> serverReader_;
     int selectedPort_ = -1;
 };
+class ClientStreamFixtureWithParam: public ClientStreamFixture, public ::testing::WithParamInterface<Scenario>
+{};
 
-INSTANTIATE_TEST_SUITE_P(ScenarioArguments, ClientStreamFixture,
+INSTANTIATE_TEST_SUITE_P(ScenarioArguments, ClientStreamFixtureWithParam,
                          testing::Values(Scenario{Scenario::ClientWritesDoneAndServerSendsResponse},
                                          Scenario{Scenario::ServerStopsReadingAndSendsResponse}
                                          ));
-TEST_P(ClientStreamFixture, CheckScenario1) {
+TEST_F(ClientStreamFixture, CheckNoGrpcByteStreamAssert) {
+    // In version 1.45 there was introduced a bug with assert
+    // byte_stream.cc:63 assertion failed: backing_buffer_.count > 0
     ConnectClientStubToServer();
     CompletionQueuePuller server_puller(*serverCompletionQueue_);
     CompletionQueuePuller client_puller(clientCompletionQueue_);
@@ -217,7 +221,7 @@ TEST_P(ClientStreamFixture, CheckScenario1) {
     SendMessagesUntilOk(*writer, client_puller, INT_MAX, sentMessageCount);
 }
 
-TEST_P(ClientStreamFixture, CheckScenario) {
+TEST_P(ClientStreamFixtureWithParam, CheckScenario) {
     ConnectClientStubToServer();
     CompletionQueuePuller server_puller(*serverCompletionQueue_);
     CompletionQueuePuller client_puller(clientCompletionQueue_);
