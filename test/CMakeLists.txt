@@ -17,6 +17,9 @@ set(_generated_dir ${CMAKE_CURRENT_BINARY_DIR}/generated)
 
 target_include_directories(grpc-tests
     PRIVATE ${_generated_dir})
+set_property(TARGET grpc-tests
+    PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+target_compile_definitions(grpc-tests PUBLIC _WIN32_WINNT=0x0A00)
 
 protobuf_generate(
     TARGET grpc-tests

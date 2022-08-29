@@ -31,7 +31,6 @@ protected:
         FinishCall,
         WriteDone,
     };
-    ClientStreamFixture() {}
     void SetUp() override {
         grpc::ServerBuilder builder;
         builder.AddListeningPort("[::]:", grpc::InsecureServerCredentials(), &selectedPort_);
@@ -55,6 +54,9 @@ protected:
         server_->Shutdown();
         serverCompletionQueue_->Shutdown();
         DrainCompletionQueue(*serverCompletionQueue_);
+        clientContext_.TryCancel();
+        clientCompletionQueue_.Shutdown();
+        DrainCompletionQueue(clientCompletionQueue_);
     }
     static void DrainCompletionQueue(grpc::CompletionQueue &cq) {
         void *tag;
@@ -187,7 +189,6 @@ INSTANTIATE_TEST_SUITE_P(ScenarioArguments, ClientStreamFixture,
                                          Scenario{Scenario::ServerStopsReadingAndSendsResponse}
                                          ));
 TEST_P(ClientStreamFixture, CheckScenario1) {
-    GTEST_SKIP();
     ConnectClientStubToServer();
     CompletionQueuePuller server_puller(*serverCompletionQueue_);
     CompletionQueuePuller client_puller(clientCompletionQueue_);
