@@ -31,7 +31,7 @@ protected:
         FinishCall,
         WriteDone,
     };
-    ClientStreamFixture() : serverReader_(&serverContext_) {}
+    ClientStreamFixture() {}
     void SetUp() override {
         grpc::ServerBuilder builder;
         builder.AddListeningPort("[::]:", grpc::InsecureServerCredentials(), &selectedPort_);
@@ -63,7 +63,8 @@ protected:
             ;
     }
     void StartServerWaiting(void *tag) {
-        service_.RequestClientStream(&serverContext_, &serverReader_, serverCompletionQueue_.get(),
+        serverReader_ = std::make_unique<grpc::ServerAsyncReader<CountMsg, StringMsg>>(&serverContext_);
+        service_.RequestClientStream(&serverContext_, serverReader_.get(), serverCompletionQueue_.get(),
                                      serverCompletionQueue_.get(), tag);
     }
     [[nodiscard]] std::unique_ptr<grpc::ClientAsyncWriter<StringMsg>> StartClientCall(CountMsg &response, void *tag) {
@@ -129,7 +130,7 @@ protected:
     void ReadMessagesUntilOk(StringMsg *readMessage, CompletionQueuePuller &puller, int &readMessageCount) {
         for (;;) {
             readMessage->set_text("not initialized");
-            serverReader_.Read(readMessage, reinterpret_cast<void *>(Operation::ReadCall));
+            serverReader_->Read(readMessage, reinterpret_cast<void *>(Operation::ReadCall));
             if (puller.Pull() != grpc::CompletionQueue::GOT_EVENT || !puller.ok())
                 break;
             ++readMessageCount;
@@ -159,12 +160,13 @@ protected:
         grpc::Status okStatus;
         CountMsg serverResponse;
         serverResponse.set_num(finish_num);
-        serverReader_.Finish(serverResponse, okStatus, reinterpret_cast<void *>(Operation::FinishCall));
+        serverReader_->Finish(serverResponse, okStatus, reinterpret_cast<void *>(Operation::FinishCall));
         ASSERT_PRED_FORMAT4(AssertCompletion, puller, Operation::FinishCall, true,
                             grpc::CompletionQueue::GOT_EVENT);
+        serverReader_.reset();
     }
     void FinishServerRpcWithError(const grpc::Status& serverFinishStatus, CompletionQueuePuller& puller){
-        serverReader_.FinishWithError(serverFinishStatus, reinterpret_cast<void *>(Operation::FinishCall));
+        serverReader_->FinishWithError(serverFinishStatus, reinterpret_cast<void *>(Operation::FinishCall));
         ASSERT_PRED_FORMAT4(AssertCompletion, puller, Operation::FinishCall, true,
                                 grpc::CompletionQueue::GOT_EVENT);
     }
@@ -176,14 +178,16 @@ protected:
     std::unique_ptr<MyService::Stub> clientStub_;
     grpc::ServerContext serverContext_;
     grpc::ClientContext clientContext_;
-    grpc::ServerAsyncReader<CountMsg, StringMsg> serverReader_;
+    std::unique_ptr<grpc::ServerAsyncReader<CountMsg, StringMsg>> serverReader_;
     int selectedPort_ = -1;
 };
 
 INSTANTIATE_TEST_SUITE_P(ScenarioArguments, ClientStreamFixture,
-                         testing::Values(Scenario{Scenario::ServerStopsReadingAndSendsResponse},
-                                         Scenario{Scenario::ClientWritesDoneAndServerSendsResponse}));
+                         testing::Values(Scenario{Scenario::ClientWritesDoneAndServerSendsResponse},
+                                         Scenario{Scenario::ServerStopsReadingAndSendsResponse}
+                                         ));
 TEST_P(ClientStreamFixture, CheckScenario1) {
+    GTEST_SKIP();
     ConnectClientStubToServer();
     CompletionQueuePuller server_puller(*serverCompletionQueue_);
     CompletionQueuePuller client_puller(clientCompletionQueue_);
@@ -197,7 +201,7 @@ TEST_P(ClientStreamFixture, CheckScenario1) {
     ASSERT_PRED_FORMAT4(AssertCompletion, server_puller, Operation::IncomingCall, true,
                         grpc::CompletionQueue::GOT_EVENT);
     StringMsg readMessage;
-    serverReader_.Read(&readMessage, reinterpret_cast<void *>(Operation::ReadCall));
+    serverReader_->Read(&readMessage, reinterpret_cast<void *>(Operation::ReadCall));
     StringMsg sentMessage;
     writer->Write(sentMessage, reinterpret_cast<void *>(Operation::WriteCall));
     ASSERT_PRED_FORMAT4(AssertCompletion, client_puller, Operation::WriteCall, true,
@@ -277,7 +281,7 @@ TEST_P(ClientStreamFixture, CheckScenario) {
         ASSERT_PRED_FORMAT4(AssertCompletion, client_puller, Operation::FinishCall, true,
                             grpc::CompletionQueue::TIMEOUT);
         // server gets false and sends response
-        serverReader_.Read(&readMessage, reinterpret_cast<void *>(Operation::ReadCall));
+        serverReader_->Read(&readMessage, reinterpret_cast<void *>(Operation::ReadCall));
         ASSERT_PRED_FORMAT4(AssertCompletion, server_puller, Operation::ReadCall, false,
                             grpc::CompletionQueue::GOT_EVENT);
         // start finishing process
