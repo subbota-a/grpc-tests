@@ -1,7 +1,12 @@
 [requires]
-grpc/1.46.3
+grpc/1.45.2
+protobuf/3.21.4
 gtest/1.12.1
 magic_enum/0.8.0
+#abseil/20211102.0#3fb08406ae2ab864b813aec0ccb71658
+
+[build_requires]
+protobuf/3.21.4
 
 [generators]
 cmake_find_package

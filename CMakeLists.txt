@@ -13,6 +13,7 @@ else()
     set(_conan_settings compiler.runtime=MT)
 endif()
 
+# It requires conan 1.50 or later
 conan_cmake_run(
     CONANFILE conanfile.txt
     BASIC_SETUP CMAKE_TARGETS
