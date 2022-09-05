@@ -154,7 +154,7 @@ protected:
     }
 
     static void SendMessagesUntilOk(grpc::ClientAsyncWriter<StringMsg> &writer, CompletionQueuePuller &puller,
-                                    int max_count, int &sentMessageCount) {
+                                    int max_count, int &sentMessageCount, std::optional<std::chrono::milliseconds> delay = {}) {
         while (sentMessageCount < max_count) {
             ++sentMessageCount;
             StringMsg sentMessage;
@@ -166,6 +166,9 @@ protected:
             if (puller.Pull() != grpc::CompletionQueue::GOT_EVENT || !puller.ok())
                 break;
             ASSERT_EQ(puller.tag(), Operation::WriteCall);
+            if (delay){
+                std::this_thread::sleep_for(*delay);
+            }
         }
     }
 
@@ -284,7 +287,7 @@ TEST_F(ClientStreamFixture, DeadlineIfServerNotServes) {
     ASSERT_PRED_FORMAT4(AssertCompletion, client_puller, Operation::OutgoingCall, true,
                         grpc::CompletionQueue::GOT_EVENT);
     int sentMessageCount = 0;
-    SendMessagesUntilOk(*writer, client_puller, INT_MAX, sentMessageCount);
+    SendMessagesUntilOk(*writer, client_puller, INT_MAX, sentMessageCount, 10ms);
     ASSERT_FALSE(client_puller.ok());
 
     grpc::Status responseStatus;
