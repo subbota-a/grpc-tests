@@ -1,5 +1,5 @@
 find_package(gRPC REQUIRED)
-find_package(GTest REQUIRED )
+find_package(GTest REQUIRED)
 find_package(Protobuf REQUIRED)
 find_package(magic_enum REQUIRED)
 
@@ -14,12 +14,15 @@ target_link_libraries(grpc-tests
     )
 set(_grpc_cpp_plugin $<TARGET_FILE:gRPC::grpc_cpp_plugin>)
 set(_generated_dir ${CMAKE_CURRENT_BINARY_DIR}/generated)
-
+file(MAKE_DIRECTORY ${_generated_dir})
 target_include_directories(grpc-tests
     PRIVATE ${_generated_dir})
-set_property(TARGET grpc-tests
-    PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
-target_compile_definitions(grpc-tests PUBLIC _WIN32_WINNT=0x0A00)
+
+if (${CMAKE_CXX_COMPILER_ID} STREQUAL MSVC)
+    set_property(TARGET grpc-tests
+        PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+    target_compile_definitions(grpc-tests PUBLIC _WIN32_WINNT=0x0A00)
+endif ()
 
 protobuf_generate(
     TARGET grpc-tests

@@ -7,11 +7,13 @@ set(CMAKE_CXX_STANDARD_REQUIRED YES)
 
 include(cmake-conan/conan.cmake)
 
-if(${CMAKE_BUILD_TYPE} STREQUAL "Debug")
-    set(_conan_settings compiler.runtime=MTd)
-else()
-    set(_conan_settings compiler.runtime=MT)
-endif()
+if (${CMAKE_CXX_COMPILER_ID} STREQUAL MSVC)
+    if (${CMAKE_BUILD_TYPE} STREQUAL "Debug")
+        set(_conan_settings compiler.runtime=MTd)
+    else ()
+        set(_conan_settings compiler.runtime=MT)
+    endif ()
+endif ()
 
 conan_cmake_run(
     CONANFILE conanfile.txt
