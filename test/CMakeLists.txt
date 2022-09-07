@@ -8,7 +8,7 @@ add_executable(grpc-tests
     ${gen_sources}
     ${gen_headers}
     test.proto
-    main.cpp)
+    main.cpp server_stream.cpp common.h common.cpp)
 target_link_libraries(grpc-tests
     PUBLIC protobuf::libprotobuf gRPC::grpc++ GTest::gtest magic_enum::magic_enum
     )
@@ -22,6 +22,11 @@ if (${CMAKE_CXX_COMPILER_ID} STREQUAL MSVC)
     set_property(TARGET grpc-tests
         PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
     target_compile_definitions(grpc-tests PUBLIC _WIN32_WINNT=0x0A00)
+elseif(${CMAKE_CXX_COMPILER_ID} STREQUAL GNU)
+    target_compile_options(grpc-tests PUBLIC -fsanitize=address -g)
+    target_link_options(grpc-tests  PUBLIC -fsanitize=address)
+else()
+    message(WARNING "Unknown compiler ${CMAKE_CXX_COMPILER_ID}")
 endif ()
 
 protobuf_generate(

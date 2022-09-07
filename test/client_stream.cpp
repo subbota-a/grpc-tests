@@ -1,224 +1,86 @@
+#include "common.h"
 #include <chrono>
 #include <future>
-#include <grpcpp/grpcpp.h>
-#include <gtest/gtest.h>
 #include <gmock/gmock-matchers.h>
+#include <gtest/gtest.h>
 #include <magic_enum.hpp>
 #include <memory>
-#include <test.grpc.pb.h>
-#include <test.pb.h>
 
 using mypkg::CountMsg;
 using mypkg::MyService;
 using mypkg::StringMsg;
-using namespace magic_enum::ostream_operators;
+namespace {
 
-namespace google::protobuf {
-std::ostream &operator<<(std::ostream &os, const Message &value) { return os << value.DebugString(); }
-}// namespace google::protobuf
-namespace grpc {
-std::ostream &operator<<(std::ostream &os, CompletionQueue::NextStatus value) {
-    return os << magic_enum::enum_name(value);
-}
-std::ostream &operator<<(std::ostream &os, StatusCode value) { return os << magic_enum::enum_name(value); }
-
-}// namespace grpc
-enum Operation : std::intptr_t {// has to be the same size as pointer
-    IncomingCall,
-    OutgoingCall,
-    WriteCall,
-    ReadCall,
-    FinishCall,
-    WriteDone,
-};
-
-class CompletionQueuePuller {
-private:
-    grpc::CompletionQueue &cq_;
-    bool ok_{};
-    Operation tag_{};
-    grpc::CompletionQueue::NextStatus status_{};
-    std::chrono::milliseconds timeout_;
+class ServerCall final {
+    grpc::ServerContext context_;
+    grpc::ServerAsyncReader<CountMsg, StringMsg> serverReader_;
 
 public:
-    explicit CompletionQueuePuller(grpc::CompletionQueue &cq,
-                                   std::chrono::milliseconds timeout = std::chrono::milliseconds(100))
-        : cq_(cq), timeout_(timeout) {}
-    grpc::CompletionQueue::NextStatus Pull() {
-        auto deadline = std::chrono::system_clock::now() + timeout_;
-        status_ = cq_.AsyncNext((void **) &tag_, &ok_, deadline);
-        return status_;
-    }
-    [[nodiscard]] bool ok() const { return ok_; }
-    [[nodiscard]] Operation tag() const { return tag_; }
-    [[nodiscard]] grpc::CompletionQueue::NextStatus status() const { return status_; }
-};
-
-static void DrainCompletionQueue(grpc::CompletionQueue &cq) {
-    void *tag;
-    bool ok;
-    while (cq.Next(&tag, &ok))
-        ;
-}
-
-class Server {
-public:
-    Server() {
-        grpc::ServerBuilder builder;
-        builder.AddListeningPort("[::]:8888", grpc::InsecureServerCredentials(), &selectedPort_);
-        builder.RegisterService(&service_);
-        serverCompletionQueue_ = builder.AddCompletionQueue();
-        server_ = builder.BuildAndStart();
-    }
-    ~Server() {
-        server_->Shutdown();
-        serverCompletionQueue_->Shutdown();
-        DrainCompletionQueue(*serverCompletionQueue_);
-        server_->Wait();
-    }
-    [[nodiscard]] int Port() const { return selectedPort_; }
-    [[nodiscard]] grpc::CompletionQueue &CompletionQueue() { return *serverCompletionQueue_; }
-    void RequestClientStream(grpc::ServerContext *context, grpc::ServerAsyncReader<CountMsg, StringMsg> *reader,
-                             void *tag) {
-        service_.RequestClientStream(context, reader, serverCompletionQueue_.get(), serverCompletionQueue_.get(), tag);
+    explicit ServerCall(Server &server) : serverReader_(&context_) {
+        server.RequestClientStream(&context_, &serverReader_, reinterpret_cast<void *>(Operation::IncomingCall));
     }
 
-private:
-    int selectedPort_ = -1;
-    MyService::AsyncService service_;
-    std::unique_ptr<grpc::Server> server_;
-    std::unique_ptr<grpc::ServerCompletionQueue> serverCompletionQueue_;
-};
+    ~ServerCall() { context_.TryCancel(); }
 
-struct ServerCall final {
-    grpc::ServerContext serverContext_;
-    std::unique_ptr<grpc::ServerAsyncReader<CountMsg, StringMsg>> serverReader_;
-    explicit ServerCall()
-        : serverReader_(std::make_unique<grpc::ServerAsyncReader<CountMsg, StringMsg>>(&serverContext_)) {}
-};
-
-struct ClientCall final {
-    grpc::ClientContext clientContext_;
-    std::unique_ptr<grpc::ClientAsyncWriter<StringMsg>> clientWriter_;
-    explicit ClientCall(std::optional<std::chrono::system_clock::time_point> deadline = {}) {
-        if (deadline)
-            clientContext_.set_deadline(*deadline);
-    }
-};
-
-class ClientStreamFixture : public ::testing::Test {
-protected:
-    void StartServer() { server_ = std::make_unique<Server>(); }
-    void ConnectClientStubToServer() {
-        ASSERT_TRUE(server_);
-        ASSERT_GT(server_->Port(), 0);
-        auto serverChannel =
-            grpc::CreateChannel("localhost:" + std::to_string(server_->Port()), grpc::InsecureChannelCredentials());
-        clientStub_ = MyService::NewStub(serverChannel);
-    }
-    void CreateClientStubWithWrongChannel() {
-        auto bad_channel = grpc::CreateChannel("localhost:888", grpc::InsecureChannelCredentials());
-        clientStub_ = MyService::NewStub(bad_channel);
-    }
-    void TearDown() override {
-        if (serverCall_)
-            serverCall_->serverContext_.TryCancel();
-        server_.reset();
-        serverCall_.reset();
-        clientStub_.reset();
-        if (clientCall_)
-            clientCall_->clientContext_.TryCancel();
-        clientCompletionQueue_.Shutdown();
-        DrainCompletionQueue(clientCompletionQueue_);
-        clientCall_.reset();
-    }
-    void StartServerWaiting(void *tag) {
-        serverCall_ = std::make_unique<ServerCall>();
-        server_->RequestClientStream(&serverCall_->serverContext_, serverCall_->serverReader_.get(), tag);
-    }
-    void StartClientCall(CountMsg *response, void *tag,
-                         std::optional<std::chrono::system_clock::time_point> deadline = {}) {
-        clientCall_ = std::make_unique<ClientCall>(deadline);
-        clientCall_->clientWriter_ =
-            clientStub_->AsyncClientStream(&clientCall_->clientContext_, response, &clientCompletionQueue_, tag);
-    }
-    static testing::AssertionResult
-    AssertCompletion(const char *cq_str, [[maybe_unused]] const char *tag_str, [[maybe_unused]] const char *ok_str,
-                     [[maybe_unused]] const char *next_str, CompletionQueuePuller &puller, Operation expected_tag,
-                     bool expected_ok, grpc::CompletionQueue::NextStatus expected_next) {
-        auto next = puller.Pull();
-        if (next == expected_next) {
-            if (next != grpc::CompletionQueue::GOT_EVENT
-                || (expected_tag == puller.tag() && expected_ok == puller.ok()))
-                return testing::AssertionSuccess();
-            auto failure = testing::AssertionFailure();
-            failure << cq_str;
-            if (expected_ok != puller.ok())
-                failure << "\nok: actual " << puller.ok() << " expected " << expected_ok;
-            if (expected_tag != puller.tag())
-                failure << "\ntag: actual " << magic_enum::enum_name(puller.tag()) << " expected "
-                        << magic_enum::enum_name(expected_tag);
-            return failure;
-        } else {
-            return testing::AssertionFailure() << cq_str << " returns " << magic_enum::enum_name(next) << " expected "
-                                               << magic_enum::enum_name(expected_next);
-        }
-    }
-    static bool IsStatusEquals(const grpc::Status &stat1, const grpc::Status &stat2) {
-        return stat1.error_code() == stat2.error_code() && stat1.error_message() == stat2.error_message();
-    }
-
-    static void SendMessagesUntilOk(grpc::ClientAsyncWriter<StringMsg> &writer, CompletionQueuePuller &puller,
-                                    int max_count, int &sentMessageCount,
-                                    std::optional<std::chrono::milliseconds> delay = {}) {
-        while (sentMessageCount < max_count) {
-            ++sentMessageCount;
-            StringMsg sentMessage;
-            sentMessage.set_text(std::to_string(sentMessageCount));
-            auto opt = grpc::WriteOptions();
-            if (sentMessageCount + 1 < max_count)
-                opt.set_buffer_hint();
-            writer.Write(sentMessage, opt, reinterpret_cast<void *>(Operation::WriteCall));
-            if (puller.Pull() != grpc::CompletionQueue::GOT_EVENT || !puller.ok())
-                break;
-            ASSERT_EQ(puller.tag(), Operation::WriteCall);
-            if (delay) {
-                std::this_thread::sleep_for(*delay);
-            }
-        }
+    void Read(StringMsg *readMessage) {
+        serverReader_.Read(readMessage, reinterpret_cast<void *>(Operation::ReadCall));
     }
 
     void ReadMessagesUntilOk(StringMsg *readMessage, CompletionQueuePuller &puller, int &readMessageCount,
                              int maxReadCount) {
-        for (readMessageCount = 0; readMessageCount < maxReadCount;) {
-            readMessage->set_text("not initialized");
-            serverCall_->serverReader_->Read(readMessage, reinterpret_cast<void *>(Operation::ReadCall));
-            if (puller.Pull() != grpc::CompletionQueue::GOT_EVENT || !puller.ok())
-                break;
-            ++readMessageCount;
-            ASSERT_EQ(puller.tag(), Operation::ReadCall);
-            ASSERT_EQ(std::to_string(readMessageCount), readMessage->text());
-        }
+        ::ReadMessagesUntilOk(serverReader_, readMessage, puller, readMessageCount, maxReadCount);
     }
-    void FinishServerRpc(int finish_num, CompletionQueuePuller &puller) {
+
+    void FinishServerRpc(int finish_num) {
         grpc::Status okStatus;
         CountMsg serverResponse;
         serverResponse.set_num(finish_num);
-        serverCall_->serverReader_->Finish(serverResponse, okStatus, reinterpret_cast<void *>(Operation::FinishCall));
-        ASSERT_PRED_FORMAT4(AssertCompletion, puller, Operation::FinishCall, true, grpc::CompletionQueue::GOT_EVENT);
-        serverCall_.reset();
+        serverReader_.Finish(serverResponse, okStatus, reinterpret_cast<void *>(Operation::FinishCall));
     }
-    void FinishServerRpcWithError(const grpc::Status &serverFinishStatus, CompletionQueuePuller &puller) {
-        serverCall_->serverReader_->FinishWithError(serverFinishStatus,
-                                                    reinterpret_cast<void *>(Operation::FinishCall));
-        ASSERT_PRED_FORMAT4(AssertCompletion, puller, Operation::FinishCall, true, grpc::CompletionQueue::GOT_EVENT);
+};
+
+class ClientCall final {
+    grpc::ClientContext context_;
+    std::unique_ptr<grpc::ClientAsyncWriter<StringMsg>> clientWriter_;
+
+public:
+    CountMsg response_;
+    grpc::Status responseStatus;
+
+    ClientCall(Client &client, std::optional<std::chrono::system_clock::time_point> deadline) {
+        if (deadline)
+            context_.set_deadline(*deadline);
+        clientWriter_ =
+            client.AsyncClientStream(&context_, &response_, reinterpret_cast<void *>(Operation::OutgoingCall));
+    }
+    ~ClientCall() { context_.TryCancel(); }
+
+    void Write(const StringMsg &sentMessage) {
+        clientWriter_->Write(sentMessage, reinterpret_cast<void *>(Operation::WriteCall));
+    }
+    void WritesDone() { clientWriter_->WritesDone(reinterpret_cast<void *>(Operation::WriteDone)); }
+    void SendMessagesUntilOk(CompletionQueuePuller &puller, int max_count, int &sentMessageCount,
+                             std::optional<std::chrono::milliseconds> delay = {}) {
+        ::SendMessagesUntilOk(*clientWriter_, puller, max_count, sentMessageCount, delay);
+    }
+    void Finish() { clientWriter_->Finish(&responseStatus, reinterpret_cast<void *>(Operation::FinishCall)); }
+};
+
+}// namespace
+
+class ClientStreamFixture : public BaseFixture {
+protected:
+    void TearDown() override {
         serverCall_.reset();
+        clientCall_.reset();
+        BaseFixture::TearDown();
+    }
+    void StartServerWaiting() { serverCall_ = std::make_unique<ServerCall>(*server_); }
+    void StartClientCall(std::optional<std::chrono::system_clock::time_point> deadline = {}) {
+        clientCall_ = std::make_unique<ClientCall>(*client_, deadline);
     }
 
 protected:
-    std::unique_ptr<Server> server_;
-    grpc::CompletionQueue clientCompletionQueue_;
-    std::unique_ptr<MyService::Stub> clientStub_;
     std::unique_ptr<ServerCall> serverCall_;
     std::unique_ptr<ClientCall> clientCall_;
 };
@@ -230,24 +92,23 @@ TEST_F(ClientStreamFixture, CheckNoGrpcByteStreamAssert) {
     StartServer();
     ConnectClientStubToServer();
     CompletionQueuePuller server_puller(server_->CompletionQueue());
-    CompletionQueuePuller client_puller(clientCompletionQueue_);
+    CompletionQueuePuller client_puller(client_->CompletionQueue());
 
     // start stream from client to server and wait for completion
-    CountMsg response;
-    StartClientCall(&response, reinterpret_cast<void *>(Operation::OutgoingCall));
+    StartClientCall();
     ASSERT_PRED_FORMAT4(AssertCompletion, client_puller, Operation::OutgoingCall, true,
                         grpc::CompletionQueue::GOT_EVENT);
 
     // start waiting for client stream and wait for completion
-    StartServerWaiting(reinterpret_cast<void *>(Operation::IncomingCall));
+    StartServerWaiting();
     ASSERT_PRED_FORMAT4(AssertCompletion, server_puller, Operation::IncomingCall, true,
                         grpc::CompletionQueue::GOT_EVENT);
     // start reading the message
     StringMsg readMessage;
-    serverCall_->serverReader_->Read(&readMessage, reinterpret_cast<void *>(Operation::ReadCall));
+    serverCall_->Read(&readMessage);
     // start writing the message
     StringMsg sentMessage;
-    clientCall_->clientWriter_->Write(sentMessage, reinterpret_cast<void *>(Operation::WriteCall));
+    clientCall_->Write(sentMessage);
     // wait for write completed
     ASSERT_PRED_FORMAT4(AssertCompletion, client_puller, Operation::WriteCall, true, grpc::CompletionQueue::GOT_EVENT);
     // wait for read completed
@@ -255,16 +116,17 @@ TEST_F(ClientStreamFixture, CheckNoGrpcByteStreamAssert) {
 
     // finish server stream
     const int finish_num = 2124146;// random number
-    FinishServerRpc(finish_num, server_puller);
+    serverCall_->FinishServerRpc(finish_num);
+    ASSERT_PRED_FORMAT4(AssertCompletion, server_puller, Operation::FinishCall, true, grpc::CompletionQueue::GOT_EVENT);
+    serverCall_.reset();
 
     // client doesn't know about it and goes on writing until ok is true
     // here gRPC fails on assert!
     int sentMessageCount = 0;
-    SendMessagesUntilOk(*clientCall_->clientWriter_, client_puller, INT_MAX, sentMessageCount);
+    clientCall_->SendMessagesUntilOk(client_puller, INT_MAX, sentMessageCount);
     EXPECT_LT(sentMessageCount, INT_MAX);
 
-    grpc::Status responseStatus;
-    clientCall_->clientWriter_->Finish(&responseStatus, reinterpret_cast<void *>(Operation::FinishCall));
+    clientCall_->Finish();
     EXPECT_PRED_FORMAT4(AssertCompletion, client_puller, Operation::FinishCall, true, grpc::CompletionQueue::GOT_EVENT);
 }
 
@@ -272,55 +134,53 @@ TEST_F(ClientStreamFixture, IdealScenario) {
     StartServer();
     ConnectClientStubToServer();
     CompletionQueuePuller server_puller(server_->CompletionQueue());
-    CompletionQueuePuller client_puller(clientCompletionQueue_);
+    CompletionQueuePuller client_puller(client_->CompletionQueue());
 
     const int no_response_num = -1;
     const int response_num = 2124146;// random number
-    CountMsg response;
-    response.set_num(no_response_num);
 
     // Client gets write
-    StartClientCall(&response, reinterpret_cast<void *>(Operation::OutgoingCall));
+    StartClientCall();
     // Call is successful even server doesn't wait for the call
     ASSERT_PRED_FORMAT4(AssertCompletion, client_puller, Operation::OutgoingCall, true,
                         grpc::CompletionQueue::GOT_EVENT);
 
     // Server makes themselves ready for getting the call
-    StartServerWaiting(reinterpret_cast<void *>(Operation::IncomingCall));
+    StartServerWaiting();
     ASSERT_PRED_FORMAT4(AssertCompletion, server_puller, Operation::IncomingCall, true,
                         grpc::CompletionQueue::GOT_EVENT);
 
     const int maxSentMessageCount = 1000;
     auto client_done = std::async([&] {
         // Client can request for finish at any moment, it doesn't close the client stream
-        grpc::Status responseStatus(grpc::INTERNAL, "not initialized");
-        clientCall_->clientWriter_->Finish(&responseStatus, reinterpret_cast<void *>(Operation::FinishCall));
+        clientCall_->Finish();
 
         int sentMessageCount = 0;
-        SendMessagesUntilOk(*clientCall_->clientWriter_, client_puller, maxSentMessageCount, sentMessageCount);
+        clientCall_->SendMessagesUntilOk(client_puller, maxSentMessageCount, sentMessageCount);
         EXPECT_EQ(maxSentMessageCount, sentMessageCount);
 
-        clientCall_->clientWriter_->WritesDone(reinterpret_cast<void *>(Operation::WriteDone));
+        clientCall_->WritesDone();
         // there are two pending requests in the queue
-        EXPECT_EQ(client_puller.Pull(),grpc::CompletionQueue::GOT_EVENT);
+        EXPECT_EQ(client_puller.Pull(), grpc::CompletionQueue::GOT_EVENT);
         EXPECT_TRUE(client_puller.ok());
         EXPECT_THAT(client_puller.tag(), ::testing::AnyOf(Operation::WriteDone, Operation::FinishCall));
 
-        EXPECT_EQ(client_puller.Pull(),grpc::CompletionQueue::GOT_EVENT);
+        EXPECT_EQ(client_puller.Pull(), grpc::CompletionQueue::GOT_EVENT);
         EXPECT_TRUE(client_puller.ok());
         EXPECT_THAT(client_puller.tag(), ::testing::AnyOf(Operation::WriteDone, Operation::FinishCall));
 
-        ASSERT_PRED2(IsStatusEquals, responseStatus, grpc::Status());
-        ASSERT_EQ(response.num(), response_num);
+        ASSERT_PRED2(IsStatusEquals, clientCall_->responseStatus, grpc::Status());
+        ASSERT_EQ(clientCall_->response_.num(), response_num);
     });
     auto server_done = std::async([&] {
         int readMessageCount = 0;
         StringMsg readMessage;
-        ReadMessagesUntilOk(&readMessage, server_puller, readMessageCount, INT_MAX);
+        serverCall_->ReadMessagesUntilOk(&readMessage, server_puller, readMessageCount, INT_MAX);
         EXPECT_EQ(readMessageCount, maxSentMessageCount);
         EXPECT_FALSE(server_puller.ok());
         // start finishing process
-        FinishServerRpc(response_num, server_puller);
+        serverCall_->FinishServerRpc(response_num);
+        ASSERT_PRED_FORMAT4(AssertCompletion, server_puller, Operation::FinishCall, true, grpc::CompletionQueue::GOT_EVENT);
     });
     client_done.wait();
     server_done.wait();
@@ -328,54 +188,45 @@ TEST_F(ClientStreamFixture, IdealScenario) {
 
 TEST_F(ClientStreamFixture, DeadlineIfNoRunningServer) {
     using namespace std::chrono_literals;
-    CompletionQueuePuller client_puller(clientCompletionQueue_);
     CreateClientStubWithWrongChannel();
-    CountMsg response;
-    StartClientCall(&response, reinterpret_cast<void *>(Operation::OutgoingCall),
-                    std::chrono::system_clock::now() + 10ms);
+    CompletionQueuePuller client_puller(client_->CompletionQueue());
+    StartClientCall(std::chrono::system_clock::now() + 10ms);
     // Call is successful even server doesn't wait for the call
     ASSERT_PRED_FORMAT4(AssertCompletion, client_puller, Operation::OutgoingCall, false,
                         grpc::CompletionQueue::GOT_EVENT);
 
-    grpc::Status responseStatus;
-    clientCall_->clientWriter_->Finish(&responseStatus, reinterpret_cast<void *>(Operation::FinishCall));
+    clientCall_->Finish();
     EXPECT_PRED_FORMAT4(AssertCompletion, client_puller, Operation::FinishCall, true, grpc::CompletionQueue::GOT_EVENT);
-    EXPECT_TRUE(responseStatus.error_code() == grpc::StatusCode::DEADLINE_EXCEEDED
-                || responseStatus.error_code() == grpc::StatusCode::UNAVAILABLE);
+    EXPECT_THAT(clientCall_->responseStatus.error_code(),
+                ::testing::AnyOf(grpc::StatusCode::DEADLINE_EXCEEDED, grpc::StatusCode::UNAVAILABLE));
 }
 
 TEST_F(ClientStreamFixture, DeadlineIfServerNotServes) {
     using namespace std::chrono_literals;
-    CompletionQueuePuller client_puller(clientCompletionQueue_);
     StartServer();
     ConnectClientStubToServer();
-    CountMsg response;
-    StartClientCall(&response, reinterpret_cast<void *>(Operation::OutgoingCall),
-                    std::chrono::system_clock::now() + 10ms);
+    CompletionQueuePuller client_puller(client_->CompletionQueue());
+    StartClientCall(std::chrono::system_clock::now() + 10ms);
     // Call is successful even server doesn't wait for the call
     ASSERT_PRED_FORMAT4(AssertCompletion, client_puller, Operation::OutgoingCall, true,
                         grpc::CompletionQueue::GOT_EVENT);
     int sentMessageCount = 0;
-    SendMessagesUntilOk(*clientCall_->clientWriter_, client_puller, INT_MAX, sentMessageCount, 10ms);
+    clientCall_->SendMessagesUntilOk(client_puller, INT_MAX, sentMessageCount, 10ms);
     ASSERT_FALSE(client_puller.ok());
 
-    grpc::Status responseStatus;
-    clientCall_->clientWriter_->Finish(&responseStatus, reinterpret_cast<void *>(Operation::FinishCall));
+    clientCall_->Finish();
     EXPECT_PRED_FORMAT4(AssertCompletion, client_puller, Operation::FinishCall, true, grpc::CompletionQueue::GOT_EVENT);
-    EXPECT_EQ(responseStatus.error_code(), grpc::StatusCode::DEADLINE_EXCEEDED);
+    EXPECT_EQ(clientCall_->responseStatus.error_code(), grpc::StatusCode::DEADLINE_EXCEEDED);
 
     // Even client terminates rpc, server don't know about
     CompletionQueuePuller server_puller(server_->CompletionQueue());
-    StartServerWaiting(reinterpret_cast<void *>(Operation::IncomingCall));
+    StartServerWaiting();
     ASSERT_PRED_FORMAT4(AssertCompletion, server_puller, Operation::IncomingCall, true,
                         grpc::CompletionQueue::GOT_EVENT);
     StringMsg readMessage;
-    serverCall_->serverReader_->Read(&readMessage, reinterpret_cast<void *>(Operation::ReadCall));
+    serverCall_->Read(&readMessage);
     ASSERT_PRED_FORMAT4(AssertCompletion, server_puller, Operation::ReadCall, false, grpc::CompletionQueue::GOT_EVENT);
-    grpc::Status okStatus;
-    CountMsg serverResponse;
-    serverResponse.set_num(1);
-    serverCall_->serverReader_->Finish(serverResponse, okStatus, reinterpret_cast<void *>(Operation::FinishCall));
+    serverCall_->FinishServerRpc(1);
     ASSERT_PRED_FORMAT4(AssertCompletion, server_puller, Operation::FinishCall, false,
                         grpc::CompletionQueue::GOT_EVENT);
 }
@@ -406,19 +257,18 @@ INSTANTIATE_TEST_SUITE_P(ScenarioArguments, ClientStreamFixtureTimeout,
 TEST_P(ClientStreamFixtureTimeout, DeadlineWaitServerResponse) {
     using namespace std::chrono_literals;
     StartServer();
-    CompletionQueuePuller client_puller(clientCompletionQueue_);
-    CompletionQueuePuller server_puller(server_->CompletionQueue());
     ConnectClientStubToServer();
+    CompletionQueuePuller server_puller(server_->CompletionQueue());
+    CompletionQueuePuller client_puller(client_->CompletionQueue());
     auto start = std::chrono::system_clock::now();
     const auto context_timeout = 50ms;
-    CountMsg response;
     bool expired = false;
     if (GetParam() == TimeoutScenario::ExpiredBeforeRequest) {
         std::this_thread::sleep_until(start + 2 * context_timeout);
         expired = true;
     }
     // send request to server
-    StartClientCall(&response, reinterpret_cast<void *>(Operation::OutgoingCall), start + context_timeout);
+    StartClientCall(start + context_timeout);
     ASSERT_PRED_FORMAT4(AssertCompletion, client_puller, Operation::OutgoingCall, !expired,
                         grpc::CompletionQueue::GOT_EVENT);
     if (client_puller.ok()) {
@@ -427,7 +277,7 @@ TEST_P(ClientStreamFixtureTimeout, DeadlineWaitServerResponse) {
             expired = true;
         }
         // server doesn't sensitive to deadline
-        StartServerWaiting(reinterpret_cast<void *>(Operation::IncomingCall));
+        StartServerWaiting();
         ASSERT_PRED_FORMAT4(AssertCompletion, server_puller, Operation::IncomingCall, true,
                             grpc::CompletionQueue::GOT_EVENT);
 
@@ -437,7 +287,7 @@ TEST_P(ClientStreamFixtureTimeout, DeadlineWaitServerResponse) {
         }
 
         StringMsg sentMessage;
-        clientCall_->clientWriter_->Write(sentMessage, reinterpret_cast<void *>(Operation::WriteCall));
+        clientCall_->Write(sentMessage);
         EXPECT_PRED_FORMAT4(AssertCompletion, client_puller, Operation::WriteCall, !expired,
                             grpc::CompletionQueue::GOT_EVENT);
         if (server_puller.ok()) {
@@ -446,7 +296,7 @@ TEST_P(ClientStreamFixtureTimeout, DeadlineWaitServerResponse) {
                 expired = true;
             }
             StringMsg readMessage;
-            serverCall_->serverReader_->Read(&readMessage, reinterpret_cast<void *>(Operation::ReadCall));
+            serverCall_->Read(&readMessage);
             ASSERT_PRED_FORMAT4(AssertCompletion, server_puller, Operation::ReadCall, !expired,
                                 grpc::CompletionQueue::GOT_EVENT);
         }
@@ -456,7 +306,7 @@ TEST_P(ClientStreamFixtureTimeout, DeadlineWaitServerResponse) {
                 expired = true;
             }
 
-            clientCall_->clientWriter_->WritesDone(reinterpret_cast<void *>(Operation::WriteDone));
+            clientCall_->WritesDone();
             EXPECT_PRED_FORMAT4(AssertCompletion, client_puller, Operation::WriteDone, !expired,
                                 grpc::CompletionQueue::GOT_EVENT);
         }
@@ -466,7 +316,7 @@ TEST_P(ClientStreamFixtureTimeout, DeadlineWaitServerResponse) {
                 expired = true;
             }
             StringMsg readMessage;
-            serverCall_->serverReader_->Read(&readMessage, reinterpret_cast<void *>(Operation::ReadCall));
+            serverCall_->Read(&readMessage);
             ASSERT_PRED_FORMAT4(AssertCompletion, server_puller, Operation::ReadCall, false,
                                 grpc::CompletionQueue::GOT_EVENT);
         }
@@ -475,9 +325,7 @@ TEST_P(ClientStreamFixtureTimeout, DeadlineWaitServerResponse) {
             std::this_thread::sleep_until(start + 2 * context_timeout);
             expired = true;
         }
-        CountMsg server_response;
-        serverCall_->serverReader_->Finish(server_response, grpc::Status(),
-                                           reinterpret_cast<void *>(Operation::FinishCall));
+        serverCall_->FinishServerRpc(12313);
         ASSERT_PRED_FORMAT4(AssertCompletion, server_puller, Operation::FinishCall, !expired,
                             grpc::CompletionQueue::GOT_EVENT);
 
@@ -485,55 +333,31 @@ TEST_P(ClientStreamFixtureTimeout, DeadlineWaitServerResponse) {
             std::this_thread::sleep_until(start + 2 * context_timeout);
             expired = true;
         }
-        grpc::Status responseStatus;
-        clientCall_->clientWriter_->Finish(&responseStatus, reinterpret_cast<void *>(Operation::FinishCall));
+        clientCall_->Finish();
         EXPECT_PRED_FORMAT4(AssertCompletion, client_puller, Operation::FinishCall, true,
                             grpc::CompletionQueue::GOT_EVENT);
         if (expired) {
-            EXPECT_EQ(responseStatus.error_code(), grpc::StatusCode::DEADLINE_EXCEEDED);
+            EXPECT_EQ(clientCall_->responseStatus.error_code(), grpc::StatusCode::DEADLINE_EXCEEDED);
         } else {
-            EXPECT_TRUE(responseStatus.ok());
+            EXPECT_TRUE(clientCall_->responseStatus.ok());
         }
     }
 }
 
-TEST(WrongUsage, NeverLeftUnhandledRequestsInQueueAndDeleteClientWriter) {
+TEST(WrongUsage, DISABLED_NeverLeftUnhandledRequestsInQueueAndDeleteClientWriter) {
     GTEST_FLAG_SET(death_test_style, "threadsafe");
     using namespace std::chrono_literals;
-    auto channel = grpc::CreateChannel("localhost:111", grpc::InsecureChannelCredentials());
-    auto client_stub = MyService::NewStub(channel);
-    grpc::CompletionQueue cq;
-    CompletionQueuePuller puller(cq);
-    CountMsg msg;
-    {
-        auto call = std::make_unique<ClientCall>();
-        call->clientWriter_ = client_stub->AsyncClientStream(&call->clientContext_, &msg, &cq,
-                                                             reinterpret_cast<void *>(Operation::OutgoingCall));
-        call->clientContext_.TryCancel();
-        call.reset();
-        cq.Shutdown();
-        ASSERT_DEATH(DrainCompletionQueue(cq), ".*");
-    }
+    auto client = std::make_unique<Client>(grpc::CreateChannel("localhost:111", grpc::InsecureChannelCredentials()));
+    auto call = std::make_unique<ClientCall>(*client, std::nullopt);
+    call.reset();
+    ASSERT_DEATH(client.reset(), ".*");
 }
 
-TEST(WrongUsage, NeverLeftUnhandledRequestsInQueueAndDeleteServerReader) {
-    GTEST_SKIP() << "Turn on this test to reproduce a crash";
+TEST(WrongUsage, DISABLED_NeverLeftUnhandledRequestsInQueueAndDeleteServerReader) {
     GTEST_FLAG_SET(death_test_style, "threadsafe");
     using namespace std::chrono_literals;
-    MyService::AsyncService service;
-    grpc::ServerBuilder builder;
-    builder.AddListeningPort("[::]:8888", grpc::InsecureServerCredentials(), nullptr);
-    builder.RegisterService(&service);
-    auto serverCompletionQueue = builder.AddCompletionQueue();
-    auto server = builder.BuildAndStart();
-    auto serverCall = std::make_unique<ServerCall>();
-    service.RequestClientStream(&serverCall->serverContext_, serverCall->serverReader_.get(),
-                                serverCompletionQueue.get(), serverCompletionQueue.get(),
-                                reinterpret_cast<void *>(Operation::IncomingCall));
-    serverCall->serverContext_.TryCancel();
-    serverCall.reset(); // don't do this!
-    server->Shutdown();
-    serverCompletionQueue->Shutdown();
-    DrainCompletionQueue(*serverCompletionQueue); // grpc will fail here
-    server->Wait();
+    auto server = std::make_unique<Server>();
+    auto serverCall = std::make_unique<ServerCall>(*server);
+    serverCall.reset();// don't do this!
+    ASSERT_DEATH(server.reset(), ".*");
 }
