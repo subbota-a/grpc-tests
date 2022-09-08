@@ -27,6 +27,7 @@ enum Operation : std::intptr_t {// has to be the same size as pointer
     ReadCall,
     FinishCall,
     WriteDone,
+    AsyncDone,
 };
 
 class CompletionQueuePuller {

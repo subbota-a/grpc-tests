@@ -57,7 +57,8 @@ void SendMessagesUntilOk(grpc::internal::AsyncWriterInterface<mypkg::StringMsg>&
         if (sentMessageCount + 1 < max_count)
             opt.set_buffer_hint();
         writer.Write(sentMessage, reinterpret_cast<void *>(Operation::WriteCall));
-        if (puller.Pull() != grpc::CompletionQueue::GOT_EVENT || !puller.ok())
+
+        if (puller.Pull() != grpc::CompletionQueue::GOT_EVENT || !puller.ok() || puller.tag() == Operation::AsyncDone)
             break;
         ASSERT_EQ(puller.tag(), Operation::WriteCall);
         if (delay) {
