@@ -180,7 +180,8 @@ TEST_F(ClientStreamFixture, IdealScenario) {
         EXPECT_FALSE(server_puller.ok());
         // start finishing process
         serverCall_->FinishServerRpc(response_num);
-        ASSERT_PRED_FORMAT4(AssertCompletion, server_puller, Operation::FinishCall, true, grpc::CompletionQueue::GOT_EVENT);
+        ASSERT_PRED_FORMAT4(AssertCompletion, server_puller, Operation::FinishCall, true,
+                            grpc::CompletionQueue::GOT_EVENT);
     });
     client_done.wait();
     server_done.wait();
@@ -344,20 +345,27 @@ TEST_P(ClientStreamFixtureTimeout, DeadlineWaitServerResponse) {
     }
 }
 
-TEST(WrongUsage, DISABLED_NeverLeftUnhandledRequestsInQueueAndDeleteClientWriter) {
+TEST(WrongUsage, NeverLeftUnhandledRequestsInQueueAndDeleteClientWriter) {
     GTEST_FLAG_SET(death_test_style, "threadsafe");
-    using namespace std::chrono_literals;
-    auto client = std::make_unique<Client>(grpc::CreateChannel("localhost:111", grpc::InsecureChannelCredentials()));
-    auto call = std::make_unique<ClientCall>(*client, std::nullopt);
-    call.reset();
-    ASSERT_DEATH(client.reset(), ".*");
+    ASSERT_DEATH(
+        {
+            auto client =
+                std::make_unique<Client>(grpc::CreateChannel("localhost:111", grpc::InsecureChannelCredentials()));
+            auto call = std::make_unique<ClientCall>(*client, std::nullopt);
+            call.reset();  // there is call left in the queue
+            client.reset();// crashes here
+        },
+        ".*");
 }
 
-TEST(WrongUsage, DISABLED_NeverLeftUnhandledRequestsInQueueAndDeleteServerReader) {
+TEST(WrongUsage, NeverLeftUnhandledRequestsInQueueAndDeleteServerReader) {
     GTEST_FLAG_SET(death_test_style, "threadsafe");
-    using namespace std::chrono_literals;
-    auto server = std::make_unique<Server>();
-    auto serverCall = std::make_unique<ServerCall>(*server);
-    serverCall.reset();// don't do this!
-    ASSERT_DEATH(server.reset(), ".*");
+    ASSERT_DEATH(
+        {
+            auto server = std::make_unique<Server>();
+            auto serverCall = std::make_unique<ServerCall>(*server);
+            serverCall.reset();// there is call left in the queue
+            server.reset();    // crashes here
+        },
+        ".*");
 }
