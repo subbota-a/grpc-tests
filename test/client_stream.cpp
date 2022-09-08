@@ -66,6 +66,20 @@ public:
     void Finish() { clientWriter_->Finish(&responseStatus, reinterpret_cast<void *>(Operation::FinishCall)); }
 };
 
+enum class TimeoutScenario {
+    NotExpired,
+    ExpiredBeforeRequest,
+    ExpiredBeforeAccept,
+    ExpiredBeforeWrite,
+    ExpiredBeforeRead,
+    ExpiredBeforeWritesDone,
+    ExpiredBeforeReadDone,
+    ExpiredBeforeServerFinish,
+    ExpiredBeforeClientReceivesFinish
+};
+
+std::ostream &operator<<(std::ostream &os, TimeoutScenario value) { return os << magic_enum::enum_name(value); }
+
 }// namespace
 
 class ClientStreamFixture : public BaseFixture {
@@ -232,18 +246,6 @@ TEST_F(ClientStreamFixture, DeadlineIfServerNotServes) {
                         grpc::CompletionQueue::GOT_EVENT);
 }
 
-enum class TimeoutScenario {
-    NotExpired,
-    ExpiredBeforeRequest,
-    ExpiredBeforeAccept,
-    ExpiredBeforeWrite,
-    ExpiredBeforeRead,
-    ExpiredBeforeWritesDone,
-    ExpiredBeforeReadDone,
-    ExpiredBeforeServerFinish,
-    ExpiredBeforeClientReceivesFinish
-};
-std::ostream &operator<<(std::ostream &os, TimeoutScenario value) { return os << magic_enum::enum_name(value); }
 class ClientStreamFixtureTimeout : public ClientStreamFixture, public ::testing::WithParamInterface<TimeoutScenario> {};
 
 INSTANTIATE_TEST_SUITE_P(ScenarioArguments, ClientStreamFixtureTimeout,
