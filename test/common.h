@@ -90,6 +90,10 @@ public:
         service_.RequestServerStream(context, request, writer, serverCompletionQueue_.get(),
                                      serverCompletionQueue_.get(), tag);
     }
+    void RequestBiStream(grpc::ServerContext *context, grpc::ServerAsyncReaderWriter<mypkg::StringMsg, mypkg::StringMsg> *stream, void*tag){
+        service_.RequestBiStream(context, stream, serverCompletionQueue_.get(),
+                                 serverCompletionQueue_.get(), tag);
+    }
 
 private:
     int selectedPort_ = -1;
@@ -116,6 +120,9 @@ public:
     std::unique_ptr<grpc::ClientAsyncReader<mypkg::StringMsg>>
     AsyncServerStream(grpc::ClientContext *context, const mypkg::CountMsg &request, void *tag) {
         return clientStub_->AsyncServerStream(context, request, &completion_queue_, tag);
+    }
+    std::unique_ptr<grpc::ClientAsyncReaderWriter<mypkg::StringMsg, mypkg::StringMsg>> AsyncBiStream(grpc::ClientContext *context, void *tag){
+        return clientStub_->AsyncBiStream(context, &completion_queue_, tag);
     }
 
 private:
