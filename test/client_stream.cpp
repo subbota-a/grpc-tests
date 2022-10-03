@@ -155,7 +155,7 @@ TEST_F(ClientStreamFixture, IdealScenario) {
 
     // Client gets write
     StartClientCall();
-    // Call is successful even server doesn't wait for the call
+    // The call is successful even if server doesn't wait for the call.
     ASSERT_PRED_FORMAT4(AssertCompletion, client_puller, Operation::OutgoingCall, true,
                         grpc::CompletionQueue::GOT_EVENT);
 
@@ -166,7 +166,7 @@ TEST_F(ClientStreamFixture, IdealScenario) {
 
     const int maxSentMessageCount = 1000;
     auto client_done = std::async([&] {
-        // Client can request for finish at any moment, it doesn't close the client stream
+        // Client can request for finish at any moment, it doesn't close the client stream.
         clientCall_->Finish();
 
         int sentMessageCount = 0;

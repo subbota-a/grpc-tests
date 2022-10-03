@@ -4,7 +4,7 @@ package mypkg;
 
 service MyService {
   rpc ServerStream (CountMsg) returns (stream StringMsg) {}
-  rpc Single (StringMsg) returns (StringMsg) {}
+  rpc Unary (StringMsg) returns (StringMsg) {}
   rpc ClientStream(stream StringMsg) returns (CountMsg) {}
   rpc BiStream(stream StringMsg) returns (stream StringMsg) {}
 }
