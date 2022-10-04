@@ -42,7 +42,6 @@ public:
         server.RequestUnary(&context_, &request_, writer_.get(),
                                    reinterpret_cast<void *>(Operation::IncomingCall));
     }
-    ~ServerCall() { context_.TryCancel(); }
     void Finish(const StringMsg& response) {
         writer_->Finish(response, grpc::Status(), reinterpret_cast<void *>(Operation::FinishCall));
     }
@@ -87,4 +86,36 @@ TEST_F(UnaryFixture, IdealScenario) {
     });
     client_thread.wait();
     server_thread.wait();
+}
+
+TEST_F(UnaryFixture, ClientCancelsCall) {
+    StartServer();
+    ConnectClientStubToServer();
+    CompletionQueuePuller client_puller(client_->CompletionQueue());
+    StringMsg request;
+    request.set_text("REQUEST");
+    auto client_call = StartClientCall(request);
+
+    CompletionQueuePuller server_puller(server_->CompletionQueue());
+    auto server_call = StartServerRequest();
+    ASSERT_PRED_FORMAT4(AssertCompletion, server_puller, Operation::IncomingCall, true,
+                        grpc::CompletionQueue::GOT_EVENT);
+
+    client_call->TryCancel();
+    ASSERT_PRED_FORMAT4(AssertCompletion, client_puller, Operation::OutgoingCall, true,
+                        grpc::CompletionQueue::GOT_EVENT);
+    EXPECT_EQ(client_call->finish_status_.error_code(), grpc::StatusCode::CANCELLED);
+
+    StringMsg response;
+    response.set_text("RESPONSE");
+    server_call->Finish(response);
+    ASSERT_PRED_FORMAT4(AssertCompletion, server_puller, Operation::FinishCall, true,
+                        grpc::CompletionQueue::GOT_EVENT);
+}
+
+TEST_F(UnaryFixture, StopServerWithPendingRequest) {
+    StartServer();
+    auto server_call = StartServerRequest();
+    server_.reset();
+    server_call.reset();
 }
