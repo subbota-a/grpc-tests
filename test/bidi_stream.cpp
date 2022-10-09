@@ -72,19 +72,21 @@ TEST_F(BidiStreamFixture, IdealScenario) {
                 puller.Pull();
                 ASSERT_EQ(puller.status(), grpc::CompletionQueue::NextStatus::GOT_EVENT);
                 if (puller.tag() == Operation::WriteCall) {
-                    ASSERT_GT(write_count,write_completion_count);
-                    ASSERT_TRUE(puller.ok());
                     ++write_completion_count;
+                    ASSERT_EQ(write_count,write_completion_count);
+                    ASSERT_TRUE(puller.ok());
                     if constexpr (requires(decltype(call) c){ c->WritesDone(); }){
                         if (write_completion_count == requested_count) {
                             call->WritesDone();
                         }
                     }
                 } else if (puller.tag() == Operation::ReadCall){
-                    ASSERT_GT(read_count, read_completion_count);
-                    ASSERT_EQ(read_msg.text(), read_text);
-                    ++read_completion_count;
                     read_finished = !puller.ok();
+                    ++read_completion_count;
+                    ASSERT_EQ(read_count, read_completion_count);
+                    if (!read_finished) {
+                        ASSERT_EQ(read_msg.text(), read_text);
+                    }
                 } else {
                     ASSERT_EQ(puller.tag(), Operation::WriteDone);
                     ASSERT_TRUE(puller.ok());
