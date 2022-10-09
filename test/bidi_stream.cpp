@@ -21,7 +21,8 @@ public:
             context_.set_deadline(*deadline);
         stream_ = client.AsyncBiStream(&context_, reinterpret_cast<void *>(Operation::OutgoingCall));
     }
-    ~ClientCall() { context_.TryCancel(); }
+    void TryCancel() { context_.TryCancel(); }
+
     void Read(StringMsg *msg) { stream_->Read(msg, reinterpret_cast<void *>(Operation::ReadCall)); }
     void Write(const StringMsg &msg) { stream_->Write(msg, reinterpret_cast<void *>(Operation::WriteCall)); }
     void WritesDone() { stream_->WritesDone(reinterpret_cast<void *>(Operation::WriteDone)); }
@@ -130,4 +131,62 @@ TEST_F(BidiStreamFixture, IdealScenario) {
     });
     client_thread.wait();
     server_thread.wait();
+}
+
+TEST_F(BidiStreamFixture, ServerBreaksStream) {
+    using namespace std::chrono_literals;
+    StartServer();
+    ConnectClientStubToServer();
+
+    CompletionQueuePuller client_puller(client_->CompletionQueue(), 500ms);
+    auto client_call = StartClientCall();
+    CompletionQueuePuller server_puller(server_->CompletionQueue(), 500ms);
+    auto server_call = StartServerStream();
+    ASSERT_PRED_FORMAT4(AssertCompletion, client_puller, Operation::OutgoingCall, true,
+                        grpc::CompletionQueue::GOT_EVENT);
+    ASSERT_PRED_FORMAT4(AssertCompletion, server_puller, Operation::IncomingCall, true,
+                        grpc::CompletionQueue::GOT_EVENT);
+
+    server_call->Finish(grpc::Status(grpc::StatusCode::INTERNAL, "Just break"));
+    ASSERT_PRED_FORMAT4(AssertCompletion, server_puller, Operation::FinishCall, true,
+                        grpc::CompletionQueue::GOT_EVENT);
+
+    StringMsg read_msg;
+    client_call->Read(&read_msg);
+    ASSERT_PRED_FORMAT4(AssertCompletion, client_puller, Operation::ReadCall, false,
+                        grpc::CompletionQueue::GOT_EVENT);
+    client_call->Finish();
+    ASSERT_PRED_FORMAT4(AssertCompletion, client_puller, Operation::FinishCall, true,
+                        grpc::CompletionQueue::GOT_EVENT);
+    EXPECT_FALSE(client_call->finish_status_.ok());
+}
+
+TEST_F(BidiStreamFixture, ClientBreaksStream) {
+    using namespace std::chrono_literals;
+    StartServer();
+    ConnectClientStubToServer();
+
+    CompletionQueuePuller client_puller(client_->CompletionQueue(), 500ms);
+    auto client_call = StartClientCall();
+    CompletionQueuePuller server_puller(server_->CompletionQueue(), 500ms);
+    auto server_call = StartServerStream();
+    ASSERT_PRED_FORMAT4(AssertCompletion, client_puller, Operation::OutgoingCall, true,
+                        grpc::CompletionQueue::GOT_EVENT);
+    ASSERT_PRED_FORMAT4(AssertCompletion, server_puller, Operation::IncomingCall, true,
+                        grpc::CompletionQueue::GOT_EVENT);
+
+    client_call.reset();
+
+    StringMsg read_msg;
+    server_call->Read(&read_msg);
+    ASSERT_PRED_FORMAT4(AssertCompletion, server_puller, Operation::ReadCall, false,
+                        grpc::CompletionQueue::GOT_EVENT);
+
+    StringMsg write_msg;
+    server_call->Write(write_msg);
+    ASSERT_PRED_FORMAT4(AssertCompletion, server_puller, Operation::WriteCall, false,
+                        grpc::CompletionQueue::GOT_EVENT);
+
+    server_call->Finish(grpc::Status(grpc::StatusCode::INTERNAL, "Just break"));
+    ASSERT_EQ(server_puller.Pull(), grpc::CompletionQueue::GOT_EVENT);
 }
