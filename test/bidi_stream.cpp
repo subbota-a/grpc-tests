@@ -61,7 +61,7 @@ protected:
     };
 
     template<typename CallType>
-    ReadWriteResult ReadWrite(CallType* call, CompletionQueuePuller &puller, const char *write_text,
+    ReadWriteResult ReadWrite(CallType *call, CompletionQueuePuller &puller, const char *write_text,
                               const char *read_text, std::optional<int> max_write_count) {
         StringMsg write_msg;
         StringMsg read_msg;
@@ -72,7 +72,7 @@ protected:
         bool read_running = false;
         bool read_finished = false;
         bool write_finished = false;
-        bool stop_writing = max_write_count && *max_write_count == 0;
+        bool stop_writing = max_write_count == 0;
         bool got_finish = false;
         while (!write_finished || !read_finished) {
             if (read_running || write_running) {
@@ -80,11 +80,14 @@ protected:
                 EXPECT_EQ(puller.status(), grpc::CompletionQueue::NextStatus::GOT_EVENT);
                 if (puller.tag() == Operation::WriteCall) {
                     write_running = false;
-                    EXPECT_TRUE(puller.ok());
-                    ++write_count;
-                    if (max_write_count && write_count == *max_write_count
-                        || !max_write_count && read_finished) {
+                    if (puller.ok()) {
+                        ++write_count;
+                        if (max_write_count && write_count == *max_write_count || !max_write_count && read_finished) {
+                            stop_writing = true;
+                        }
+                    } else {
                         stop_writing = true;
+                        write_finished = true;
                     }
                 } else if (puller.tag() == Operation::ReadCall) {
                     read_finished = !puller.ok();
@@ -93,8 +96,7 @@ protected:
                         ++read_count;
                         EXPECT_EQ(read_msg.text(), read_text);
                     }
-                } else if (puller.tag() == Operation::WriteDone){
-                    EXPECT_TRUE(puller.ok());
+                } else if (puller.tag() == Operation::WriteDone) {
                     write_running = false;
                     write_finished = true;
                 } else {
@@ -129,53 +131,47 @@ protected:
         return ReadWriteResult{read_count, write_count, got_finish};
     }
 };
+struct SendCount {
+    std::optional<int> client;
+    std::optional<int> server;
+    friend std::ostream& operator<<(std::ostream& os, const SendCount& value) {
+        os << "Client: ";
+        if (value.client)
+            os << *value.client;
+        else
+            os << "null";
+        os << " Server: ";
+        if (value.server)
+            os << *value.server;
+        else
+            os << "null";
+        return os;
+    }
+};
 
-TEST_F(BidiStreamFixture, EachSideSendsCountOfMessagesAndReadsItInParallel) {
+class BidiStreamSendNFixture : public BidiStreamFixture, public testing::WithParamInterface<SendCount> {};
+
+INSTANTIATE_TEST_SUITE_P(TestSuite, BidiStreamSendNFixture,
+                         testing::Values(SendCount{1'000, 1'000}, SendCount{1'000, 1}, SendCount{1'000, 0},
+                                         SendCount{1'000, std::nullopt}, SendCount{1, 1'000}, SendCount{1, 1},
+                                         SendCount{1, 0}, SendCount{1, std::nullopt}, SendCount{0, 1'000},
+                                         SendCount{0, 1}, SendCount{0, 0}, SendCount{0, std::nullopt}));
+
+TEST_P(BidiStreamSendNFixture, EachSideWritesCountOrUntilOtherSideIsDone) {
     using namespace std::chrono_literals;
     StartServer();
     ConnectClientStubToServer();
-    const int requested_count = 1'000;
-    auto client_thread = std::async([&] {
-        CompletionQueuePuller puller(client_->CompletionQueue(), 500ms);
-        auto call = StartClientCall();
-        ASSERT_PRED_FORMAT4(AssertCompletion, puller, Operation::OutgoingCall, true, grpc::CompletionQueue::GOT_EVENT);
-
-        auto result = ReadWrite(call.get(), puller, "CLIENT", "SERVER", requested_count);
-        EXPECT_EQ(result.read, requested_count);
-        EXPECT_EQ(result.write, requested_count);
-        EXPECT_FALSE(result.got_finish);
-
-        call->Finish();
-        ASSERT_PRED_FORMAT4(AssertCompletion, puller, Operation::FinishCall, true, grpc::CompletionQueue::GOT_EVENT);
-        EXPECT_TRUE(call->finish_status_.ok());
-    });
-    auto server_thread = std::async([&] {
-        CompletionQueuePuller puller(server_->CompletionQueue(), 500ms);
-        auto call = StartServerStream();
-        ASSERT_PRED_FORMAT4(AssertCompletion, puller, Operation::IncomingCall, true, grpc::CompletionQueue::GOT_EVENT);
-        auto result = ReadWrite(call.get(), puller, "SERVER", "CLIENT", requested_count);
-        EXPECT_EQ(result.read, requested_count);
-        EXPECT_EQ(result.write, requested_count);
-
-        call->Finish(grpc::Status());
-        ASSERT_PRED_FORMAT4(AssertCompletion, puller, Operation::FinishCall, true, grpc::CompletionQueue::GOT_EVENT);
-    });
-    client_thread.wait();
-    server_thread.wait();
-}
-
-TEST_F(BidiStreamFixture, ServerWritesUntilClientWritesDone) {
-    using namespace std::chrono_literals;
-    StartServer();
-    ConnectClientStubToServer();
-    int client_message_count = 1'000;
     auto client_thread = std::async([&] {
         CompletionQueuePuller puller(client_->CompletionQueue(), 500ms);
         auto call = StartClientCall();
         EXPECT_PRED_FORMAT4(AssertCompletion, puller, Operation::OutgoingCall, true, grpc::CompletionQueue::GOT_EVENT);
-        auto result = ReadWrite(call.get(), puller, "CLIENT", "SERVER", client_message_count);
-        EXPECT_EQ(result.write, client_message_count);
-        EXPECT_GT(result.read, client_message_count/10);
+        auto result = ReadWrite(call.get(), puller, "CLIENT", "SERVER", GetParam().client);
+        if (GetParam().client) {
+            EXPECT_EQ(result.write, *GetParam().client);
+        }
+        if (GetParam().server) {
+            EXPECT_EQ(result.read, *GetParam().server);
+        }
         EXPECT_FALSE(result.got_finish);
 
         call->Finish();
@@ -188,9 +184,13 @@ TEST_F(BidiStreamFixture, ServerWritesUntilClientWritesDone) {
         auto call = StartServerStream();
         EXPECT_PRED_FORMAT4(AssertCompletion, puller, Operation::IncomingCall, true, grpc::CompletionQueue::GOT_EVENT);
 
-        auto result = ReadWrite(call.get(), puller, "SERVER", "CLIENT", std::nullopt);
-        EXPECT_EQ(result.read, client_message_count);
-        EXPECT_GT(result.write, client_message_count/10);
+        auto result = ReadWrite(call.get(), puller, "SERVER", "CLIENT", GetParam().server);
+        if (GetParam().server) {
+            EXPECT_EQ(result.write, *GetParam().server);
+        }
+        if (GetParam().client) {
+            EXPECT_EQ(result.read, *GetParam().client);
+        }
 
         call->Finish(grpc::Status(grpc::StatusCode::ABORTED, "ABORTED"));
         EXPECT_PRED_FORMAT4(AssertCompletion, puller, Operation::FinishCall, true, grpc::CompletionQueue::GOT_EVENT);
@@ -199,11 +199,10 @@ TEST_F(BidiStreamFixture, ServerWritesUntilClientWritesDone) {
     server_thread.wait();
 }
 
-TEST_F(BidiStreamFixture, ClientFinishFirst) {
+TEST_P(BidiStreamSendNFixture, EachSideWritesCountOrUntilOtherSideIsDoneAndClientWaitsForFinishInAdvance) {
     using namespace std::chrono_literals;
     StartServer();
     ConnectClientStubToServer();
-    int client_message_count = 1'000;
     auto client_thread = std::async([&] {
         CompletionQueuePuller puller(client_->CompletionQueue(), 500ms);
         auto call = StartClientCall();
@@ -211,9 +210,13 @@ TEST_F(BidiStreamFixture, ClientFinishFirst) {
 
         call->Finish();
 
-        auto result = ReadWrite(call.get(), puller, "CLIENT", "SERVER", client_message_count);
-        EXPECT_EQ(result.write, client_message_count);
-        EXPECT_GT(result.read, 0);
+        auto result = ReadWrite(call.get(), puller, "CLIENT", "SERVER", GetParam().client);
+        if (GetParam().client) {
+            EXPECT_EQ(result.write, *GetParam().client);
+        }
+        if (GetParam().server) {
+            EXPECT_EQ(result.read, *GetParam().server);
+        }
 
         if (!result.got_finish) {
             EXPECT_PRED_FORMAT4(AssertCompletion, puller, Operation::FinishCall, true,
@@ -227,9 +230,13 @@ TEST_F(BidiStreamFixture, ClientFinishFirst) {
         auto call = StartServerStream();
         EXPECT_PRED_FORMAT4(AssertCompletion, puller, Operation::IncomingCall, true, grpc::CompletionQueue::GOT_EVENT);
 
-        auto result = ReadWrite(call.get(), puller, "SERVER", "CLIENT", std::nullopt);
-        EXPECT_EQ(result.read, client_message_count);
-        EXPECT_GT(result.write, 0);
+        auto result = ReadWrite(call.get(), puller, "SERVER", "CLIENT", GetParam().server);
+        if (GetParam().server) {
+            EXPECT_EQ(result.write, *GetParam().server);
+        }
+        if (GetParam().client) {
+            EXPECT_EQ(result.read, *GetParam().client);
+        }
 
         call->Finish(grpc::Status(grpc::StatusCode::ABORTED, "ABORTED"));
         EXPECT_PRED_FORMAT4(AssertCompletion, puller, Operation::FinishCall, true, grpc::CompletionQueue::GOT_EVENT);
