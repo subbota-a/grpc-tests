@@ -6,6 +6,7 @@ magic_enum/0.8.0
 
 [generators]
 cmake_find_package_multi
+cmake_paths
 
 [imports]
 bin, *.dll -> .

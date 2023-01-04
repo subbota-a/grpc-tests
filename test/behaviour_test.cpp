@@ -1,5 +1,8 @@
+#ifdef _WINDOWS
 #include <windows.h>
 #undef max
+#endif
+
 #include "common.h"
 #include "unary_call.h"
 #include <chrono>
@@ -12,7 +15,9 @@ class BehaviourFixture : public UnaryFixture{
 protected:
     void SetUp() override {
         UnaryFixture::SetUp();
-        ASSERT_TRUE(SetProcessAffinityMask(GetCurrentProcess(), 0x1));
+#ifdef _WINDOWS
+        ASSERT_TRUE(SetProcessAffinityMask(GetCurrentProcess(), 0x3));
+#endif
     }
 };
 
