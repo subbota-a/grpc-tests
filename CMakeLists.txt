@@ -8,19 +8,37 @@ set(CMAKE_CXX_STANDARD_REQUIRED YES)
 include(cmake-conan/conan.cmake)
 
 if (${CMAKE_CXX_COMPILER_ID} STREQUAL MSVC)
-    if (${CMAKE_BUILD_TYPE} STREQUAL "Debug")
-        set(_conan_settings compiler.runtime=MTd)
-    else ()
-        set(_conan_settings compiler.runtime=MT)
-    endif ()
+    get_property(isMultiConfig GLOBAL PROPERTY GENERATOR_IS_MULTI_CONFIG)
+    if (isMultiConfig)
+        message("Generator is multi config")
+        conan_cmake_run(
+            CONANFILE conanfile.txt
+            BASIC_SETUP CMAKE_TARGETS
+            BUILD missing
+            SETTINGS compiler.runtime=MTd build_type=Debug
+        )
+#        conan_cmake_run(
+#            CONANFILE conanfile.txt
+#            BASIC_SETUP CMAKE_TARGETS
+#            BUILD missing
+#            SETTINGS compiler.runtime=MT build_type=RelWithDebInfo
+#        )
+    else()
+        message("Generator is single config for ${CMAKE_BUILD_TYPE}")
+        if ("${CMAKE_BUILD_TYPE}" STREQUAL "Debug")
+            set(_conan_settings compiler.runtime=MTd)
+        else ()
+            set(_conan_settings compiler.runtime=MT)
+        endif ()
+        conan_cmake_run(
+            CONANFILE conanfile.txt
+            BASIC_SETUP CMAKE_TARGETS
+            BUILD missing
+            SETTINGS ${_conan_settings}
+        )
+    endif()
 endif ()
 
-conan_cmake_run(
-    CONANFILE conanfile.txt
-    BASIC_SETUP CMAKE_TARGETS
-    BUILD missing
-    SETTINGS ${_conan_settings}
-)
 include(${CMAKE_BINARY_DIR}/conan_paths.cmake)
 
 add_subdirectory(test)

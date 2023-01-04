@@ -8,7 +8,8 @@ add_executable(grpc-tests
     ${gen_sources}
     ${gen_headers}
     test.proto
-    main.cpp server_stream.cpp common.h common.cpp bidi_stream.cpp unary.cpp)
+    main.cpp server_stream.cpp common.h common.cpp bidi_stream.cpp unary_test.cpp behaviour_test.cpp unary_call.h)
+
 target_link_libraries(grpc-tests
     PUBLIC protobuf::libprotobuf gRPC::grpc++ GTest::gtest magic_enum::magic_enum
     )
