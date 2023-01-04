@@ -5,8 +5,7 @@ gtest/1.12.1
 magic_enum/0.8.0
 
 [generators]
-cmake_find_package
-cmake_paths
+cmake_find_package_multi
 
 [imports]
 bin, *.dll -> .
