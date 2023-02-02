@@ -22,7 +22,6 @@ target_include_directories(grpc-tests
 if (${CMAKE_CXX_COMPILER_ID} STREQUAL MSVC)
     set_property(TARGET grpc-tests
         PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
-    target_compile_definitions(grpc-tests PUBLIC _WIN32_WINNT=0x0A00)
 elseif(${CMAKE_CXX_COMPILER_ID} STREQUAL GNU)
     target_compile_options(grpc-tests PUBLIC -fsanitize=address -g)
     target_link_options(grpc-tests  PUBLIC -fsanitize=address)
