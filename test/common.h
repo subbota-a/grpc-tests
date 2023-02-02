@@ -30,13 +30,18 @@ enum Operation : std::intptr_t {// has to be the same size as pointer
     AsyncDone,
 };
 
+struct CompletionQueueTag {
+    void *call;
+    Operation operation;
+};
+
 class CompletionQueuePuller {
 private:
     grpc::CompletionQueue &cq_;
     bool ok_{};
-    Operation tag_{};
     grpc::CompletionQueue::NextStatus status_{};
     std::chrono::milliseconds timeout_;
+    CompletionQueueTag *tag_{nullptr};
 
 public:
     explicit CompletionQueuePuller(grpc::CompletionQueue &cq,
@@ -49,7 +54,8 @@ public:
         return status_;
     }
     [[nodiscard]] bool ok() const { return ok_; }
-    [[nodiscard]] Operation tag() const { return tag_; }
+    [[nodiscard]] Operation tag() const { return tag_->operation; }
+    [[nodiscard]] void *call() const { return tag_->call; }
     [[nodiscard]] grpc::CompletionQueue::NextStatus status() const { return status_; }
 };
 
@@ -60,8 +66,10 @@ testing::AssertionResult AssertCompletion(const char *cq_str, [[maybe_unused]] c
                                           grpc::CompletionQueue::NextStatus expected_next);
 bool IsStatusEquals(const grpc::Status &stat1, const grpc::Status &stat2);
 void ReadMessagesUntilOk(grpc::internal::AsyncReaderInterface<mypkg::StringMsg> &reader, mypkg::StringMsg *readMessage,
-                         CompletionQueuePuller &puller, int &readMessageCount, int maxReadCount);
-void SendMessagesUntilOk(grpc::internal::AsyncWriterInterface<mypkg::StringMsg>& writer, CompletionQueuePuller &puller, int max_count, int &sentMessageCount,
+                         CompletionQueuePuller &puller, CompletionQueueTag *tag, int &readMessageCount,
+                         int maxReadCount);
+void SendMessagesUntilOk(grpc::internal::AsyncWriterInterface<mypkg::StringMsg> &writer, CompletionQueuePuller &puller,
+                         CompletionQueueTag *tag, int max_count, int &sentMessageCount,
                          std::optional<std::chrono::milliseconds> delay);
 
 class Server {
@@ -90,13 +98,14 @@ public:
         service_.RequestServerStream(context, request, writer, serverCompletionQueue_.get(),
                                      serverCompletionQueue_.get(), tag);
     }
-    void RequestBiStream(grpc::ServerContext *context, grpc::ServerAsyncReaderWriter<mypkg::StringMsg, mypkg::StringMsg> *stream, void*tag){
-        service_.RequestBiStream(context, stream, serverCompletionQueue_.get(),
-                                 serverCompletionQueue_.get(), tag);
+    void RequestBiStream(grpc::ServerContext *context,
+                         grpc::ServerAsyncReaderWriter<mypkg::StringMsg, mypkg::StringMsg> *stream, void *tag) {
+        service_.RequestBiStream(context, stream, serverCompletionQueue_.get(), serverCompletionQueue_.get(), tag);
     }
-    void RequestUnary(grpc::ServerContext *context, mypkg::StringMsg* request, grpc::ServerAsyncResponseWriter< ::mypkg::StringMsg>* response, void *tag){
-        service_.RequestUnary(context, request, response, serverCompletionQueue_.get(),
-                              serverCompletionQueue_.get(), tag);
+    void RequestUnary(grpc::ServerContext *context, mypkg::StringMsg *request,
+                      grpc::ServerAsyncResponseWriter<::mypkg::StringMsg> *response, void *tag) {
+        service_.RequestUnary(context, request, response, serverCompletionQueue_.get(), serverCompletionQueue_.get(),
+                              tag);
     }
 
 private:
@@ -125,10 +134,12 @@ public:
     AsyncServerStream(grpc::ClientContext *context, const mypkg::CountMsg &request, void *tag) {
         return clientStub_->AsyncServerStream(context, request, &completion_queue_, tag);
     }
-    std::unique_ptr<grpc::ClientAsyncReaderWriter<mypkg::StringMsg, mypkg::StringMsg>> AsyncBiStream(grpc::ClientContext *context, void *tag){
+    std::unique_ptr<grpc::ClientAsyncReaderWriter<mypkg::StringMsg, mypkg::StringMsg>>
+    AsyncBiStream(grpc::ClientContext *context, void *tag) {
         return clientStub_->AsyncBiStream(context, &completion_queue_, tag);
     }
-    std::unique_ptr<grpc::ClientAsyncResponseReader<mypkg::StringMsg>> AsyncUnary(grpc::ClientContext *context, const mypkg::StringMsg &request){
+    std::unique_ptr<grpc::ClientAsyncResponseReader<mypkg::StringMsg>> AsyncUnary(grpc::ClientContext *context,
+                                                                                  const mypkg::StringMsg &request) {
         return clientStub_->AsyncUnary(context, request, &completion_queue_);
     }
 

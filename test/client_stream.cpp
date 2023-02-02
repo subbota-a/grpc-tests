@@ -14,56 +14,67 @@ namespace {
 class ServerCall final {
     grpc::ServerContext context_;
     grpc::ServerAsyncReader<CountMsg, StringMsg> serverReader_;
+    CompletionQueueTag tag_;
 
 public:
-    explicit ServerCall(Server &server) : serverReader_(&context_) {
-        server.RequestClientStream(&context_, &serverReader_, reinterpret_cast<void *>(Operation::IncomingCall));
+    explicit ServerCall(Server &server) : serverReader_(&context_), tag_{this, Operation::IncomingCall} {
+        server.RequestClientStream(&context_, &serverReader_, &tag_);
     }
 
     ~ServerCall() { context_.TryCancel(); }
 
     void Read(StringMsg *readMessage) {
-        serverReader_.Read(readMessage, reinterpret_cast<void *>(Operation::ReadCall));
+        tag_.operation = Operation::ReadCall;
+        serverReader_.Read(readMessage, &tag_);
     }
 
     void ReadMessagesUntilOk(StringMsg *readMessage, CompletionQueuePuller &puller, int &readMessageCount,
                              int maxReadCount) {
-        ::ReadMessagesUntilOk(serverReader_, readMessage, puller, readMessageCount, maxReadCount);
+        ::ReadMessagesUntilOk(serverReader_, readMessage, puller, &tag_, readMessageCount, maxReadCount);
     }
 
     void FinishServerRpc(int finish_num) {
         grpc::Status okStatus;
         CountMsg serverResponse;
         serverResponse.set_num(finish_num);
-        serverReader_.Finish(serverResponse, okStatus, reinterpret_cast<void *>(Operation::FinishCall));
+        tag_.operation = Operation::FinishCall;
+        serverReader_.Finish(serverResponse, okStatus, &tag_);
     }
 };
 
 class ClientCall final {
     grpc::ClientContext context_;
     std::unique_ptr<grpc::ClientAsyncWriter<StringMsg>> clientWriter_;
+    CompletionQueueTag tag_;
 
 public:
     CountMsg response_;
     grpc::Status responseStatus;
 
-    ClientCall(Client &client, std::optional<std::chrono::system_clock::time_point> deadline) {
+    ClientCall(Client &client, std::optional<std::chrono::system_clock::time_point> deadline)
+        : tag_{this, Operation::OutgoingCall} {
         if (deadline)
             context_.set_deadline(*deadline);
-        clientWriter_ =
-            client.AsyncClientStream(&context_, &response_, reinterpret_cast<void *>(Operation::OutgoingCall));
+        clientWriter_ = client.AsyncClientStream(&context_, &response_, &tag_);
     }
     ~ClientCall() { context_.TryCancel(); }
 
     void Write(const StringMsg &sentMessage) {
-        clientWriter_->Write(sentMessage, reinterpret_cast<void *>(Operation::WriteCall));
+        tag_.operation = Operation::WriteCall;
+        clientWriter_->Write(sentMessage, &tag_);
     }
-    void WritesDone() { clientWriter_->WritesDone(reinterpret_cast<void *>(Operation::WriteDone)); }
+    void WritesDone() {
+        tag_.operation = Operation::WriteDone;
+        clientWriter_->WritesDone(&tag_);
+    }
     void SendMessagesUntilOk(CompletionQueuePuller &puller, int max_count, int &sentMessageCount,
                              std::optional<std::chrono::milliseconds> delay = {}) {
-        ::SendMessagesUntilOk(*clientWriter_, puller, max_count, sentMessageCount, delay);
+        ::SendMessagesUntilOk(*clientWriter_, puller, &tag_, max_count, sentMessageCount, delay);
     }
-    void Finish() { clientWriter_->Finish(&responseStatus, reinterpret_cast<void *>(Operation::FinishCall)); }
+    void Finish() {
+        tag_.operation = Operation::FinishCall;
+        clientWriter_->Finish(&responseStatus, &tag_);
+    }
 };
 
 enum class TimeoutScenario {

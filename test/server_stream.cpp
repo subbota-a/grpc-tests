@@ -14,49 +14,61 @@ namespace {
 class ServerCall final {
     grpc::ServerContext context_;
     std::unique_ptr<grpc::ServerAsyncWriter<StringMsg>> writer_;
+    CompletionQueueTag tag_;
+    CompletionQueueTag done_tag_;
 
 public:
     CountMsg request_;
     explicit ServerCall(Server &server, bool async_done)
-        : writer_(std::make_unique<grpc::ServerAsyncWriter<StringMsg>>(&context_)) {
+        : writer_(std::make_unique<grpc::ServerAsyncWriter<StringMsg>>(&context_)), tag_{this, IncomingCall},
+          done_tag_{this, Operation::AsyncDone} {
         if (async_done) {
-            context_.AsyncNotifyWhenDone(reinterpret_cast<void *>(Operation::AsyncDone));
+            context_.AsyncNotifyWhenDone(&done_tag_);
         }
-        server.RequestServerStream(&context_, &request_, writer_.get(),
-                                   reinterpret_cast<void *>(Operation::IncomingCall));
+        server.RequestServerStream(&context_, &request_, writer_.get(), &tag_);
     }
     ~ServerCall() { context_.TryCancel(); }
     void Write(const StringMsg &sentMessage) {
-        writer_->Write(sentMessage, reinterpret_cast<void *>(Operation::WriteCall));
+        tag_.operation = Operation::WriteCall;
+        writer_->Write(sentMessage, &tag_);
     }
     void Finish(const grpc::Status &status) {
-        writer_->Finish(status, reinterpret_cast<void *>(Operation::FinishCall));
+        tag_.operation = Operation::FinishCall;
+        writer_->Finish(status, &tag_);
     }
     void SendMessagesUntilOk(CompletionQueuePuller &puller, int max_count, int &sentMessageCount,
                              std::optional<std::chrono::milliseconds> delay = {}) {
-        ::SendMessagesUntilOk(*writer_, puller, max_count, sentMessageCount, delay);
+        ::SendMessagesUntilOk(*writer_, puller, &tag_, max_count, sentMessageCount, delay);
     }
 };
 
 class ClientCall final {
     grpc::ClientContext context_;
     std::unique_ptr<grpc::ClientAsyncReader<StringMsg>> reader_;
+    CompletionQueueTag tag_;
 
 public:
     grpc::Status finish_status_;
     explicit ClientCall(Client &client, const CountMsg &request,
-                        std::optional<std::chrono::system_clock::time_point> deadline) {
+                        std::optional<std::chrono::system_clock::time_point> deadline)
+        : tag_{this, Operation::OutgoingCall} {
         if (deadline)
             context_.set_deadline(*deadline);
-        reader_ = client.AsyncServerStream(&context_, request, reinterpret_cast<void *>(Operation::OutgoingCall));
+        reader_ = client.AsyncServerStream(&context_, request, &tag_);
     }
     void TryCancel() { context_.TryCancel(); }
-    void Read(StringMsg *readMessage) { reader_->Read(readMessage, reinterpret_cast<void *>(Operation::ReadCall)); }
+    void Read(StringMsg *readMessage) {
+        tag_.operation = Operation::ReadCall;
+        reader_->Read(readMessage, &tag_);
+    }
     void ReadMessagesUntilOk(StringMsg *readMessage, CompletionQueuePuller &puller, int &readMessageCount,
                              int maxReadCount) {
-        ::ReadMessagesUntilOk(*reader_, readMessage, puller, readMessageCount, maxReadCount);
+        ::ReadMessagesUntilOk(*reader_, readMessage, puller, &tag_, readMessageCount, maxReadCount);
     }
-    void Finish() { reader_->Finish(&finish_status_, reinterpret_cast<void *>(Operation::FinishCall)); }
+    void Finish() {
+        tag_.operation = Operation::FinishCall;
+        reader_->Finish(&finish_status_, &tag_);
+    }
 };
 
 enum class TimeoutScenario {
@@ -88,7 +100,7 @@ TEST_F(ServerStreamFixture, IdealScenario) {
     StartServer();
     ConnectClientStubToServer();
 
-    const int requested_count = 1000;
+    const int requested_count = 100'000;
     auto client_thread = std::async([&] {
         CompletionQueuePuller client_puller(client_->CompletionQueue());
         CountMsg request;
@@ -189,11 +201,10 @@ TEST_P(ServerStreamFixtureTimeout, Timeout) {
     auto client_call = StartClientCall(request, start + context_timeout);
     ASSERT_PRED_FORMAT4(AssertCompletion, client_puller, Operation::OutgoingCall, !expired,
                         grpc::CompletionQueue::GOT_EVENT);
-    if (client_puller.ok())
-    {
+    if (client_puller.ok()) {
         CompletionQueuePuller server_puller(server_->CompletionQueue());
         if (GetParam() == TimeoutScenario::ExpiredBeforeAccept) {
-            if (grpc::Version() == "1.27.2"){
+            if (grpc::Version() == "1.27.2") {
                 return;
             }
             std::this_thread::sleep_until(start + 2 * context_timeout);
@@ -220,7 +231,8 @@ TEST_P(ServerStreamFixtureTimeout, Timeout) {
 
         StringMsg read_msg;
         client_call->Read(&read_msg);
-        ASSERT_PRED_FORMAT4(AssertCompletion, client_puller, Operation::ReadCall, !expired, grpc::CompletionQueue::GOT_EVENT);
+        ASSERT_PRED_FORMAT4(AssertCompletion, client_puller, Operation::ReadCall, !expired,
+                            grpc::CompletionQueue::GOT_EVENT);
 
         if (GetParam() == TimeoutScenario::ExpiredBeforeServerFinish) {
             std::this_thread::sleep_until(start + 2 * context_timeout);
@@ -243,5 +255,4 @@ TEST_P(ServerStreamFixtureTimeout, Timeout) {
             EXPECT_TRUE(client_call->finish_status_.ok());
         }
     }
-
 }

@@ -11,43 +11,54 @@
 using namespace std::chrono_literals;
 const size_t PendingIncomingRequestCount = 100'000;
 
-class BehaviourFixture : public UnaryFixture{
+class BehaviourFixture : public UnaryFixture {
 protected:
     void SetUp() override {
         UnaryFixture::SetUp();
 #ifdef _WINDOWS
-        ASSERT_TRUE(SetProcessAffinityMask(GetCurrentProcess(), 0x3));
+        //ASSERT_TRUE(SetProcessAffinityMask(GetCurrentProcess(), 0x3));
 #endif
     }
 };
 
-TEST_F(BehaviourFixture, ServerPutsNewRequestsToQueue) {
+TEST_F(BehaviourFixture, ServerPutsManyNewRequestsToQueue) {
     StartServer();
     ConnectClientStubToServer();
 
     CompletionQueuePuller client_puller(client_->CompletionQueue(), 1s);
     CompletionQueuePuller server_puller(server_->CompletionQueue(), 1s);
 
-    auto incoming_call = StartServerRequest();
+    const unsigned parallel_requests = 1;
+    for (unsigned i = 0; i < parallel_requests; ++i) {
+        StartServerRequest().release();// NOLINT(bugprone-unused-return-value)
+    }
 
-    std::vector<std::unique_ptr<UnaryClientCall>> outgoing_calls;
     StringMsg request;
     request.set_text("REQUEST");
     for (size_t i = 0; i < PendingIncomingRequestCount; ++i) {
-        outgoing_calls.push_back(StartClientCall(request));
+        StartClientCall(request).release();// NOLINT(bugprone-unused-return-value)
     }
 
     StringMsg response;
     response.set_text("RESPONSE");
-    for (size_t i = 0; i < PendingIncomingRequestCount; ++i) {
-        SCOPED_TRACE("server " + std::to_string(i));
-        ASSERT_PRED_FORMAT4(AssertCompletion, server_puller, Operation::IncomingCall, true,
-                            grpc::CompletionQueue::GOT_EVENT);
-        incoming_call->Finish(response);
-        ASSERT_PRED_FORMAT4(AssertCompletion, server_puller, Operation::FinishCall, true,
-                            grpc::CompletionQueue::GOT_EVENT);
-        if (i + 1 < PendingIncomingRequestCount) {
-            incoming_call = StartServerRequest();
+    unsigned finished_clients_requests = 0;
+    unsigned active_server_requests = parallel_requests;
+    while (finished_clients_requests < PendingIncomingRequestCount) {
+        ASSERT_EQ(server_puller.Pull(), grpc::CompletionQueue::NextStatus::GOT_EVENT);
+        ASSERT_TRUE(server_puller.ok());
+        auto server_call = static_cast<UnaryServerCall *>(server_puller.call());
+        switch (server_puller.tag()) {
+        case Operation::IncomingCall: server_call->Finish(response); break;
+        case Operation::FinishCall:
+            delete server_call;
+            ++finished_clients_requests;
+            --active_server_requests;
+            if (finished_clients_requests + active_server_requests < PendingIncomingRequestCount) {
+                StartServerRequest().release();// NOLINT(bugprone-unused-return-value)
+                ++active_server_requests;
+            }
+            break;
+        default: FAIL();
         }
     }
 
@@ -55,11 +66,10 @@ TEST_F(BehaviourFixture, ServerPutsNewRequestsToQueue) {
         SCOPED_TRACE("client " + std::to_string(i));
         ASSERT_PRED_FORMAT4(AssertCompletion, client_puller, Operation::OutgoingCall, true,
                             grpc::CompletionQueue::GOT_EVENT);
-
+        auto client_call = static_cast<UnaryClientCall *>(client_puller.call());
+        delete client_call;
     }
-    outgoing_calls.clear();
 }
-
 
 TEST_F(BehaviourFixture, ServerServeRequestImmideatly) {
     StartServer();
@@ -67,7 +77,6 @@ TEST_F(BehaviourFixture, ServerServeRequestImmideatly) {
 
     CompletionQueuePuller client_puller(client_->CompletionQueue(), 1s);
     CompletionQueuePuller server_puller(server_->CompletionQueue(), 1s);
-
 
     StringMsg request;
     request.set_text("REQUEST");
@@ -93,48 +102,50 @@ TEST_F(BehaviourFixture, OptimizedScenario) {
     CompletionQueuePuller client_puller(client_->CompletionQueue(), 1s);
     CompletionQueuePuller server_puller(server_->CompletionQueue(), 1s);
 
-    auto server_thread = std::async(std::launch::async, [&]{
+#pragma clang diagnostic push
+#pragma ide diagnostic ignored "UnusedValue"
+    [[maybe_unused]] auto server_thread = std::async(std::launch::async, [&] {
         StringMsg response;
         response.set_text("RESPONSE");
-        auto incoming_call = StartServerRequest();
+        StartServerRequest().release();// NOLINT(bugprone-unused-return-value)
         auto incoming_calls_count = 1;
-        std::vector<std::unique_ptr<UnaryServerCall>> finishing_calls;
-        for (size_t i = 0; i < PendingIncomingRequestCount; ) {
+        for (size_t i = 0; i < PendingIncomingRequestCount;) {
             ASSERT_EQ(server_puller.Pull(), grpc::CompletionQueue::GOT_EVENT);
-            switch (server_puller.tag()){
+            ASSERT_TRUE(server_puller.ok());
+            auto incoming_call = static_cast<UnaryServerCall *>(server_puller.call());
+            switch (server_puller.tag()) {
             case Operation::IncomingCall:
                 ASSERT_TRUE(server_puller.ok());
                 incoming_call->Finish(response);
-                finishing_calls.push_back(std::move(incoming_call));
-                if (incoming_calls_count<PendingIncomingRequestCount) {
-                    incoming_call = StartServerRequest();
+                if (incoming_calls_count < PendingIncomingRequestCount) {
+                    StartServerRequest().release();// NOLINT(bugprone-unused-return-value)
                     ++incoming_calls_count;
                 }
                 break;
             case Operation::FinishCall:
-                ASSERT_TRUE(server_puller.ok());
+                delete incoming_call;
                 ++i;
+                break;
+            default:
                 break;
             }
         }
     });
 
-    std::vector<std::unique_ptr<UnaryClientCall>> outgoing_calls;
-    auto client_reader = std::async(std::launch::async, [&]{
+    [[maybe_unused]] auto client_reader = std::async(std::launch::async, [&] {
         for (size_t i = 0; i < PendingIncomingRequestCount; ++i) {
             SCOPED_TRACE("client " + std::to_string(i));
             ASSERT_PRED_FORMAT4(AssertCompletion, client_puller, Operation::OutgoingCall, true,
                                 grpc::CompletionQueue::GOT_EVENT);
-
+            auto client_call = static_cast<UnaryClientCall *>(client_puller.call());
+            delete client_call;
         }
-        outgoing_calls.clear();
     });
+#pragma clang diagnostic pop
 
     StringMsg request;
     request.set_text("REQUEST");
     for (size_t i = 0; i < PendingIncomingRequestCount; ++i) {
-        outgoing_calls.push_back(StartClientCall(request));
+        StartClientCall(request).release();// NOLINT(bugprone-unused-return-value)
     }
-
-
 }

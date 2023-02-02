@@ -13,36 +13,54 @@ namespace {
 class ClientCall final {
     grpc::ClientContext context_;
     std::unique_ptr<grpc::ClientAsyncReaderWriter<StringMsg, StringMsg>> stream_;
+    CompletionQueueTag read_tag_;
+    CompletionQueueTag write_tag_;
+    CompletionQueueTag finish_tag_;
 
 public:
     grpc::Status finish_status_;
-    ClientCall(Client &client, std::optional<std::chrono::system_clock::time_point> deadline) {
+    ClientCall(Client &client, std::optional<std::chrono::system_clock::time_point> deadline)
+        : write_tag_{this, Operation::OutgoingCall}, read_tag_{this, Operation::ReadCall}, finish_tag_{
+                                                                                               this,
+                                                                                               Operation::FinishCall} {
         if (deadline)
             context_.set_deadline(*deadline);
-        stream_ = client.AsyncBiStream(&context_, reinterpret_cast<void *>(Operation::OutgoingCall));
+        stream_ = client.AsyncBiStream(&context_, &write_tag_);
     }
     void TryCancel() { context_.TryCancel(); }
 
-    void Read(StringMsg *msg) { stream_->Read(msg, reinterpret_cast<void *>(Operation::ReadCall)); }
-    void Write(const StringMsg &msg) { stream_->Write(msg, reinterpret_cast<void *>(Operation::WriteCall)); }
-    void WritesDone() { stream_->WritesDone(reinterpret_cast<void *>(Operation::WriteDone)); }
-    void Finish() { stream_->Finish(&finish_status_, reinterpret_cast<void *>(Operation::FinishCall)); }
+    void Read(StringMsg *msg) { stream_->Read(msg, &read_tag_); }
+    void Write(const StringMsg &msg) {
+        write_tag_.operation = Operation::WriteCall;
+        stream_->Write(msg, &write_tag_);
+    }
+    void WritesDone() {
+        write_tag_.operation = Operation::WriteDone;
+        stream_->WritesDone(&write_tag_);
+    }
+    void Finish() { stream_->Finish(&finish_status_, &finish_tag_); }
 };
 
 class ServerCall final {
     grpc::ServerContext context_;
     grpc::ServerAsyncReaderWriter<StringMsg, StringMsg> stream_;
+    CompletionQueueTag read_tag_;
+    CompletionQueueTag write_tag_;
+    CompletionQueueTag finish_tag_;
 
 public:
-    explicit ServerCall(Server &server) : stream_(&context_) {
-        server.RequestBiStream(&context_, &stream_, reinterpret_cast<void *>(Operation::IncomingCall));
+    explicit ServerCall(Server &server)
+        : stream_(&context_), read_tag_{this, Operation::IncomingCall}, write_tag_{this, Operation::WriteCall},
+          finish_tag_{this, Operation::FinishCall} {
+        server.RequestBiStream(&context_, &stream_, &read_tag_);
     }
     void TryCancel() { context_.TryCancel(); }
-    void Write(const StringMsg &msg) { stream_.Write(msg, reinterpret_cast<void *>(Operation::WriteCall)); }
-    void Read(StringMsg *msg) { stream_.Read(msg, reinterpret_cast<void *>(Operation::ReadCall)); }
-    void Finish(grpc::Status finish_status) {
-        stream_.Finish(finish_status, reinterpret_cast<void *>(Operation::FinishCall));
+    void Write(const StringMsg &msg) { stream_.Write(msg, &write_tag_); }
+    void Read(StringMsg *msg) {
+        read_tag_.operation = Operation::ReadCall;
+        stream_.Read(msg, &read_tag_);
     }
+    void Finish(grpc::Status finish_status) { stream_.Finish(finish_status, &finish_tag_); }
 };
 }// namespace
 
@@ -134,7 +152,7 @@ protected:
 struct SendCount {
     std::optional<int> client;
     std::optional<int> server;
-    friend std::ostream& operator<<(std::ostream& os, const SendCount& value) {
+    friend std::ostream &operator<<(std::ostream &os, const SendCount &value) {
         os << "Client: ";
         if (value.client)
             os << *value.client;

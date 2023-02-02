@@ -7,17 +7,19 @@ using mypkg::StringMsg;
 class UnaryClientCall final {
     grpc::ClientContext context_;
     std::unique_ptr<grpc::ClientAsyncResponseReader<StringMsg>> reader_;
+    CompletionQueueTag tag_;
 
 public:
     grpc::Status finish_status_;
     StringMsg response_;
 
     UnaryClientCall(Client &client, const StringMsg &request,
-                    std::optional<std::chrono::system_clock::time_point> deadline) {
+                    std::optional<std::chrono::system_clock::time_point> deadline)
+        : tag_{this, Operation::OutgoingCall} {
         if (deadline)
             context_.set_deadline(*deadline);
         reader_ = client.AsyncUnary(&context_, request);
-        reader_->Finish(&response_, &finish_status_, reinterpret_cast<void *>(Operation::OutgoingCall));
+        reader_->Finish(&response_, &finish_status_, &tag_);
     }
     void TryCancel() { context_.TryCancel(); }
 };
@@ -25,20 +27,23 @@ public:
 class UnaryServerCall final {
     grpc::ServerContext context_;
     std::unique_ptr<grpc::ServerAsyncResponseWriter<StringMsg>> writer_;
+    CompletionQueueTag tag_;
+    CompletionQueueTag async_done_tag_;
 
 public:
     StringMsg request_;
 
     explicit UnaryServerCall(Server &server, bool async_done)
-        : writer_(std::make_unique<grpc::ServerAsyncResponseWriter<StringMsg>>(&context_)) {
+        : writer_(std::make_unique<grpc::ServerAsyncResponseWriter<StringMsg>>(&context_)),
+          tag_{this, Operation::IncomingCall}, async_done_tag_{this, Operation::AsyncDone} {
         if (async_done) {
-            context_.AsyncNotifyWhenDone(reinterpret_cast<void *>(Operation::AsyncDone));
+            context_.AsyncNotifyWhenDone(&async_done_tag_);
         }
-        server.RequestUnary(&context_, &request_, writer_.get(),
-                            reinterpret_cast<void *>(Operation::IncomingCall));
+        server.RequestUnary(&context_, &request_, writer_.get(), &tag_);
     }
-    void Finish(const StringMsg& response) {
-        writer_->Finish(response, grpc::Status(), reinterpret_cast<void *>(Operation::FinishCall));
+    void Finish(const StringMsg &response) {
+        tag_.operation = Operation::FinishCall;
+        writer_->Finish(response, grpc::Status(), &tag_);
     }
 };
 

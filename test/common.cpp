@@ -7,14 +7,13 @@ void DrainCompletionQueue(grpc::CompletionQueue &cq) {
         ;
 }
 
-testing::AssertionResult
-AssertCompletion(const char *cq_str, [[maybe_unused]] const char *tag_str, [[maybe_unused]] const char *ok_str,
-                 [[maybe_unused]] const char *next_str, CompletionQueuePuller &puller, Operation expected_tag,
-                 bool expected_ok, grpc::CompletionQueue::NextStatus expected_next) {
+testing::AssertionResult AssertCompletion(const char *cq_str, [[maybe_unused]] const char *tag_str,
+                                          [[maybe_unused]] const char *ok_str, [[maybe_unused]] const char *next_str,
+                                          CompletionQueuePuller &puller, Operation expected_tag, bool expected_ok,
+                                          grpc::CompletionQueue::NextStatus expected_next) {
     auto next = puller.Pull();
     if (next == expected_next) {
-        if (next != grpc::CompletionQueue::GOT_EVENT
-            || (expected_tag == puller.tag() && expected_ok == puller.ok()))
+        if (next != grpc::CompletionQueue::GOT_EVENT || (expected_tag == puller.tag() && expected_ok == puller.ok()))
             return testing::AssertionSuccess();
         auto failure = testing::AssertionFailure();
         failure << cq_str;
@@ -34,11 +33,13 @@ bool IsStatusEquals(const grpc::Status &stat1, const grpc::Status &stat2) {
     return stat1.error_code() == stat2.error_code() && stat1.error_message() == stat2.error_message();
 }
 
-void ReadMessagesUntilOk(grpc::internal::AsyncReaderInterface<mypkg::StringMsg>& reader, mypkg::StringMsg *readMessage, CompletionQueuePuller &puller, int &readMessageCount,
+void ReadMessagesUntilOk(grpc::internal::AsyncReaderInterface<mypkg::StringMsg> &reader, mypkg::StringMsg *readMessage,
+                         CompletionQueuePuller &puller, CompletionQueueTag *tag, int &readMessageCount,
                          int maxReadCount) {
     for (readMessageCount = 0; readMessageCount < maxReadCount;) {
         readMessage->set_text("not initialized");
-        reader.Read(readMessage, reinterpret_cast<void *>(Operation::ReadCall));
+        tag->operation = Operation::ReadCall;
+        reader.Read(readMessage, tag);
         if (puller.Pull() != grpc::CompletionQueue::GOT_EVENT || !puller.ok())
             break;
         ++readMessageCount;
@@ -47,8 +48,8 @@ void ReadMessagesUntilOk(grpc::internal::AsyncReaderInterface<mypkg::StringMsg>&
     }
 }
 
-void SendMessagesUntilOk(grpc::internal::AsyncWriterInterface<mypkg::StringMsg>& writer, CompletionQueuePuller &puller, int max_count, int &sentMessageCount,
-                         std::optional<std::chrono::milliseconds> delay) {
+void SendMessagesUntilOk(grpc::internal::AsyncWriterInterface<mypkg::StringMsg> &writer, CompletionQueuePuller &puller,
+                         CompletionQueueTag *tag, int max_count, int &sentMessageCount, std::optional<std::chrono::milliseconds> delay) {
     while (sentMessageCount < max_count) {
         ++sentMessageCount;
         mypkg::StringMsg sentMessage;
@@ -56,7 +57,8 @@ void SendMessagesUntilOk(grpc::internal::AsyncWriterInterface<mypkg::StringMsg>&
         auto opt = grpc::WriteOptions();
         if (sentMessageCount + 1 < max_count)
             opt.set_buffer_hint();
-        writer.Write(sentMessage, reinterpret_cast<void *>(Operation::WriteCall));
+        tag->operation = Operation::WriteCall;
+        writer.Write(sentMessage, tag);
 
         if (puller.Pull() != grpc::CompletionQueue::GOT_EVENT || !puller.ok() || puller.tag() == Operation::AsyncDone)
             break;
